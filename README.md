@@ -69,6 +69,12 @@
 
 **录入游戏信息 → 自动检测矛盾 → 排除不可能身份 → 调整假设 → 实时更新推理结果。**
 
+## Information
+[血染钟楼-暗流涌动 wiki](https://clocktower-wiki.gstonegames.com/index.php?title=%E6%9A%97%E6%B5%81%E6%B6%8C%E5%8A%A8)
+
 ## 推理引擎
 [Engine 使用说明](engine/README.md)
 [Engine 测试说明](tests/README.md)
+
+## OpenCode 配置
+[配置说明](.opencode/README.md)
