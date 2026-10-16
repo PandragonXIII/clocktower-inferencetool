@@ -76,5 +76,17 @@
 [Engine 使用说明](engine/README.md)
 [Engine 测试说明](tests/README.md)
 
+## 网页与协议
+[接口协议](web/protocol/README.md)
+[后台/API 实现](backend/README.md)
+
+启动网页服务（同时提供 UI 与 `/api/` 后台 API，同源）：
+
+```sh
+python main.py web --host 127.0.0.1 --port 8000
+```
+
+当前后台适配器为 **placeholder（占位）**：校验请求结构但不运行推理引擎，响应 `consistency: "unknown"` 并带 `extensions["adapter:mode"] == "placeholder"`。Python 原生 `python -m http.server` 仍只提供静态文件、不含 API。
+
 ## OpenCode 配置
 [配置说明](.opencode/README.md)
