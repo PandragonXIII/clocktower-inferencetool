@@ -39,6 +39,7 @@ window.ClocktowerSkills = (() => {
 
   function validate(skill, data, players) {
     if (!skill) throw new Error("请选择技能。");
+    window.SkillAvailability.assert(skill, data);
     const targets = data.targets;
     if (!Array.isArray(targets) || new Set(targets).size !== targets.length || targets.some((id) => !players.some((p) => p.id === id))) throw new Error("目标必须是本局玩家且不能重复。");
     const empty = skill.noOutsiders && data.result?.kind === "no_outsiders";
@@ -50,7 +51,7 @@ window.ClocktowerSkills = (() => {
     if (r.kind === "unobserved" && meta.kind !== "none") return;
     if (meta.kind === "role" && (r.kind !== "role" || !meta.roles.includes(r.role_id))) throw new Error("请选择对应类别的结果角色。");
     if (meta.kind === "choice" && (r.kind !== "choice" || !meta.options.some((o) => o.value === r.value))) throw new Error("请选择技能结果。");
-    if (skill.optionalRole && r.value === "role" && !all.includes(r.role_id)) throw new Error("请选择转化后的角色。");
+    if (skill.optionalRole && r.value === "role" && r.role_id !== "imp") throw new Error("暗流涌动中的红唇女郎转化为小恶魔。");
     if (meta.kind === "number" && (r.kind !== "number" || !Number.isInteger(r.value) || r.value < 0 || r.value > (meta.max === "players" ? players.length : meta.max))) throw new Error("结果数量超出范围。");
     if (meta.kind === "text" && (r.kind !== "text" || !r.text?.trim())) throw new Error("请填写完整观察信息，或选择未观察到结果。");
     if (meta.kind === "none" && r.kind !== "no_direct_result") throw new Error("此技能不提供直接结果。");
