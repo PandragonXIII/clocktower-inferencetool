@@ -1,4 +1,4 @@
-"""从文本命题推理《暗流涌动》里每名玩家的可能身份。
+"""从文本命题推理《暗流涌动》里每名玩家的可能身份，并估计概率。
 
 在仓库根目录执行::
 
@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass, replace
+from typing import Callable
 
 from z3 import And, Not, Solver, is_true, sat, unsat, unknown
 
@@ -17,11 +19,14 @@ from botc_reasoner import (
     MAX_PLAYERS,
     ROLE_ZH,
     Ability,
+    AbilityObservation,
     Role,
     add_game_rules,
     declare_variables,
+    estimate_role_probabilities,
     minimal_unsatisfiable_subset,
     role_from_name,
+    trusted_activation,
 )
 from botc_reasoner.roles import DEMONS, MINIONS, OUTSIDERS, TOWNSFOLK
 from botc_reasoner.variables import TroubleBrewingVars
@@ -45,6 +50,28 @@ _SKILL_ROLE = {
 _ALIASES = {"恶魔": "小恶魔"}
 
 
+@dataclass(frozen=True)
+class Statement:
+    """一条玩家输入。
+
+    ``setup_only`` 为真时，这条确定前提只限制开局身份或自认，抽样可以不调用求解器。
+    公开事实和本人技能会把 ``setup_only`` 设为假，从而进入求解。
+    他人自称的 ``mode`` 是 ``soft_role`` 或 ``soft_ability``，不进入求解。
+    """
+
+    label: str
+    nights: int
+    mode: str
+    build: Callable | None = None
+    player: int | None = None
+    role: Role | None = None
+    ability: Ability | None = None
+    when: int | None = None
+    target: int | None = None
+    setup_only: bool = False
+    pin: str | None = None
+
+
 def main() -> int:
     print(_help_text())
     try:
@@ -56,55 +83,17 @@ def main() -> int:
         counts = _parse_config(config_line)
         print("命题> 每行一条，空行结束")
         lines = _read_facts()
-        nights, facts = _parse_facts(lines, sum(counts))
+        nights, statements = _parse_facts(lines, sum(counts))
     except ValueError as error:
         print(f"输入错误：{error}", file=sys.stderr)
         return 1
 
     print("正在推理...")
-    world = declare_variables(sum(counts), n_nights=nights, tag="reason")
-    solver = world.build_solver()
-    solver.set("timeout", 30000)
-    try:
-        add_game_rules(solver, world, *counts)
-        propositions = [(fact(world), label) for label, fact in facts]
-    except ValueError as error:
-        print(f"输入错误：{error}", file=sys.stderr)
+    report = _reason(counts, nights, statements)
+    if report is None:
         return 1
-
-    solver.push()
-    for expr, _label in propositions:
-        solver.add(expr)
-    status = solver.check()
-    if status == unknown:
-        print("推理超时，未能确定。")
-        return 1
-    if status == unsat:
-        solver.pop()
-        print("存在矛盾")
-        try:
-            subset = minimal_unsatisfiable_subset(solver, propositions)
-        except TimeoutError:
-            print("推理超时，未能确定矛盾来自哪些命题。")
-            return 1
-        for label in subset:
-            print(label)
-        return 0
-
-    possible = _possible_roles(solver, world)
-    if possible is None:
-        print("推理超时，未能确定。")
-        return 1
-    if any(not roles for roles in possible):
-        print("存在矛盾")
-        for index, roles in enumerate(possible, start=1):
-            if not roles:
-                print(f"玩家 {index} 无法为任何身份")
-        return 0
-
-    for index, roles in enumerate(possible, start=1):
-        names = "、".join(ROLE_ZH[role] for role in roles)
-        print(f"玩家 {index}：{names}")
+    for line in report:
+        print(line)
     return 0
 
 
@@ -120,42 +109,61 @@ def _help_text() -> str:
 第二段，每行一条命题，空行结束。角色名：{roles}
 也接受「恶魔」作为「小恶魔」。时间写成 1夜、2夜 或 1天、2天。
 
+来源要分开写。公开事实可靠性是 100%，直接限制可能身份。
+你自己的身份只有酒鬼能推翻。你自己秘密发动的技能同样进入推理。
+其他玩家的自称不限制可能身份，只按较低的可靠性改变概率。
+
+我是 <玩家> <角色>
+    你自己看到的身份。例：我是 1 占卜师
+    「自认」与「我是」相同。
+自称 <玩家> <角色>
+    另一名玩家声称的身份。例：自称 2 洗衣妇
+    每句自称按可信度 0.7 进入采信组合。组权重是三项的乘积：
+    置信度 0.7^采信人数 × 0.3^忽略人数；
+    忽略人数 i 超过邪恶人数 E 时再乘 1/3^(i-E)；
+    被忽略的技能信息先把写法数乘成 M，再乘 1/(1+log2(M))。只自称身份时 M = 1。
+    忽略人数不能超过 E + floor(G/5) - O。
+    组内只保留被采信的身份和技能读数说得通的世界。
+    某一夜的信息是被投毒才失效时，该局再乘 1/当夜入夜时仍存活的善良人数，以及当夜写法数的 1/(1+log2(M))。
+    酒鬼使各夜信息一起失效时，把这些写法数合成一个 M，再乘一次 1/(1+log2(M))。
+    红鲱鱼整局是同一名善良玩家（可以已死，也可以是占卜师自己）。
+    能同时解释全部清醒占卜结果的善良玩家占全部善良玩家的比例，也乘进该局。
+    这个乘数留在合计里，不在组内被归一掉。
+    逻辑上无解的组不计入。自称镇民时，酒鬼的面具就是该镇民。
 身份 <玩家> <角色>
-    开局真实身份。例：身份 1 洗衣妇
-自认 <玩家> <角色>
-    玩家自己相信的身份。酒鬼会相信一枚镇民标记。例：自认 2 调查员
+    已经确定的真实身份，可靠性 100%。例：身份 3 小恶魔
 不存在 <角色>
     这局没有这个身份：开局无人是它。镇民也不会是酒鬼的标记。例：不存在 贞洁者
-夜间死亡 <夜> <玩家>
-    黎明公布的夜间死亡，从第 2 夜起。例：夜间死亡 2 3
-处决 <天> <玩家>
-    白天处决，含投票和贞洁者。例：处决 1 4
-猎手死亡 <天> <玩家>
-    死于猎手射击，不是处决。例：猎手死亡 1 5
-中毒 <夜> <玩家>
-醉酒 <玩家>
-恶魔选择 <夜> <目标>
-    小恶魔当晚实际选择的人，从第 2 夜起。例：恶魔选择 2 3
-僧侣保护 <夜> <目标>
-投毒选择 <夜> <目标>
 
-发动是玩家声明使用技能。信息类技能把结果写在同一行。
-发动 1天 <玩家> 猎手 <目标>
-发动 2夜 <玩家> 小恶魔 <目标>
-发动 2夜 <玩家> 僧侣 <目标>
-发动 1夜 <玩家> 投毒者 <目标>
-发动 1夜 <玩家> 管家 <主人>
-发动 2夜 <玩家> 守鸦人 <查看的玩家> <看到的角色>
-发动 1夜 <玩家> 占卜师 <玩家A> <玩家B> 是
-发动 1夜 <玩家> 占卜师 <玩家A> <玩家B> 否
-发动 1夜 <玩家> 洗衣妇 <镇民角色> <玩家A> <玩家B>
-发动 1夜 <玩家> 图书管理员 无
-发动 1夜 <玩家> 图书管理员 <外来者角色> <玩家A> <玩家B>
-发动 1夜 <玩家> 调查员 无
-发动 1夜 <玩家> 调查员 <爪牙角色> <玩家A> <玩家B>
-发动 1夜 <玩家> 厨师 <相邻邪恶对数>
-发动 2夜 <玩家> 共情者 <0、1或2>
-发动 2夜 <玩家> 送葬者 <看到的角色>
+公开事实，可靠性 100%：
+夜间死亡 <夜> <玩家>
+    黎明公布的夜间死亡，从第 2 夜起。例：夜间死亡 2夜 3
+处决 <天> <玩家>
+    白天处决，含投票和贞洁者。例：处决 1天 4
+猎手死亡 <天> <玩家>
+    死于猎手射击，不是处决。例：猎手死亡 1天 5
+
+以下也是确定事实：中毒 <夜> <玩家>、醉酒 <玩家>、
+恶魔选择 <夜> <目标>、僧侣保护 <夜> <目标>、投毒选择 <夜> <目标>。
+
+技能要写明是你自己发动的，还是别人自称的。猎手射击当众发生，
+「我发动」和「自称发动」都按公开事实记入，并且不因此认定射手身份。
+我发动 1夜 <玩家> 占卜师 <玩家A> <玩家B> 是
+我发动 1夜 <玩家> 占卜师 <玩家A> <玩家B> 否
+自称发动 1夜 <玩家> 洗衣妇 <镇民角色> <玩家A> <玩家B>
+我发动 1天 <玩家> 猎手 <目标>
+我发动 2夜 <玩家> 小恶魔 <目标>
+我发动 2夜 <玩家> 僧侣 <目标>
+我发动 1夜 <玩家> 投毒者 <目标>
+我发动 1夜 <玩家> 管家 <主人>
+我发动 2夜 <玩家> 守鸦人 <查看的玩家> <看到的角色>
+我发动 1夜 <玩家> 图书管理员 无
+我发动 1夜 <玩家> 图书管理员 <外来者角色> <玩家A> <玩家B>
+我发动 1夜 <玩家> 调查员 无
+我发动 1夜 <玩家> 调查员 <爪牙角色> <玩家A> <玩家B>
+我发动 1夜 <玩家> 厨师 <相邻邪恶对数>
+我发动 2夜 <玩家> 共情者 <0、1或2>
+我发动 2夜 <玩家> 送葬者 <看到的角色>
 """
 
 
@@ -189,79 +197,155 @@ def _parse_config(line: str) -> tuple[int, int, int, int]:
     return numbers[0], numbers[1], numbers[2], numbers[3]
 
 
-def _parse_facts(lines: list[str], player_count: int) -> tuple[int, list]:
-    facts = []
+def _parse_facts(lines: list[str], player_count: int) -> tuple[int, list[Statement]]:
+    statements = []
     nights = 1
     for line_number, line in enumerate(lines, start=1):
         try:
-            fact, used_nights = _parse_fact(line, player_count)
+            statement = _parse_fact(line, player_count)
         except ValueError as error:
             raise ValueError(f"第 {line_number} 行：{error}") from error
-        facts.append((f"第{line_number}行：{line}", fact))
-        nights = max(nights, used_nights)
-    return nights, facts
+        statements.append(replace(statement, label=f"第{line_number}行：{line}"))
+        nights = max(nights, statement.nights)
+    return nights, statements
 
 
-def _parse_fact(line: str, player_count: int) -> tuple:
+def _parse_fact(line: str, player_count: int) -> Statement:
     tokens = line.split()
     if not tokens:
         raise ValueError("空命题")
     kind = tokens[0]
+    if kind in {"我是", "自认"}:
+        player, role = _player_and_role(tokens[1:], player_count, "我是 <玩家> <角色>")
+        return _belief(player, role)
+    if kind == "自称":
+        player, role = _player_and_role(tokens[1:], player_count, "自称 <玩家> <角色>")
+        return Statement(label="", nights=1, mode="soft_role", player=player, role=role)
     if kind == "身份":
         player, role = _player_and_role(tokens[1:], player_count, "身份 <玩家> <角色>")
-        return (lambda world, player=player, role=role: world.start_is(player, role)), 1
-    if kind == "自认":
-        player, role = _player_and_role(tokens[1:], player_count, "自认 <玩家> <角色>")
-        return (
-            lambda world, player=player, role=role: world.believes_at_start(player, role)
-        ), 1
+        return Statement(
+            label="",
+            nights=1,
+            mode="hard",
+            build=lambda world, player=player, role=role: world.start_is(player, role),
+            player=player,
+            role=role,
+            setup_only=True,
+            pin="role",
+        )
     if kind == "不存在":
         if len(tokens) != 2:
             raise ValueError("格式：不存在 <角色>")
         role = _as_role(tokens[1])
-        return (lambda world, role=role: _exclude_role(world, role)), 1
+        return Statement(
+            label="",
+            nights=1,
+            mode="hard",
+            build=lambda world, role=role: _exclude_role(world, role),
+            role=role,
+            setup_only=True,
+            pin="absent",
+        )
     if kind == "醉酒":
         if len(tokens) != 2:
             raise ValueError("格式：醉酒 <玩家>")
         player = _player(tokens[1], player_count)
-        return (lambda world, player=player: world.is_drunk[player]), 1
+        return Statement(
+            label="",
+            nights=1,
+            mode="hard",
+            build=lambda world, player=player: world.is_drunk[player],
+            player=player,
+            setup_only=True,
+            pin="drunk",
+        )
     if kind == "夜间死亡":
         night, player = _time_and_player(tokens[1:], player_count, "夜", "夜间死亡 <夜> <玩家>")
         if night < 2:
             raise ValueError("首夜没有夜间死亡")
-        return (
-            lambda world, night=night, player=player: world.night_death[night][player]
-        ), night
+        return _public(
+            lambda world, night=night, player=player: world.night_death[night][player],
+            night,
+        )
     if kind == "处决":
         day, player = _time_and_player(tokens[1:], player_count, "天", "处决 <天> <玩家>")
-        return (lambda world, day=day, player=player: world.executed[day][player]), day
+        return _public(lambda world, day=day, player=player: world.executed[day][player], day)
     if kind == "猎手死亡":
         day, player = _time_and_player(tokens[1:], player_count, "天", "猎手死亡 <天> <玩家>")
-        return (lambda world, day=day, player=player: world.slayer_kill[day][player]), day
+        return _public(lambda world, day=day, player=player: world.slayer_kill[day][player], day)
     if kind == "中毒":
         night, player = _time_and_player(tokens[1:], player_count, "夜", "中毒 <夜> <玩家>")
-        return (lambda world, night=night, player=player: world.poisoned[night][player]), night
+        return _public(lambda world, night=night, player=player: world.poisoned[night][player], night)
     if kind == "恶魔选择":
         night, player = _time_and_player(tokens[1:], player_count, "夜", "恶魔选择 <夜> <目标>")
         if night < 2:
             raise ValueError("首夜恶魔不选择击杀")
-        return (lambda world, night=night, player=player: world.imp_choice[night][player]), night
+        return _public(lambda world, night=night, player=player: world.imp_choice[night][player], night)
     if kind == "僧侣保护":
         night, player = _time_and_player(tokens[1:], player_count, "夜", "僧侣保护 <夜> <目标>")
         if night < 2:
             raise ValueError("僧侣从第 2 夜才行动")
-        return (lambda world, night=night, player=player: world.monk_choice[night][player]), night
+        return _public(lambda world, night=night, player=player: world.monk_choice[night][player], night)
     if kind == "投毒选择":
         night, player = _time_and_player(tokens[1:], player_count, "夜", "投毒选择 <夜> <目标>")
-        return (lambda world, night=night, player=player: world.poison_choice[night][player]), night
+        return _public(
+            lambda world, night=night, player=player: world.poison_choice[night][player],
+            night,
+        )
     if kind == "发动":
-        return _parse_activation(tokens[1:], player_count)
+        raise ValueError("请写「我发动」或「自称发动」")
+    if kind in {"我发动", "自称发动"}:
+        return _activation_statement(tokens[1:], player_count, own=kind == "我发动")
     raise ValueError(f"无法识别的命题：{kind}")
+
+
+def _belief(player: int, role: Role) -> Statement:
+    return Statement(
+        label="",
+        nights=1,
+        mode="hard",
+        build=lambda world, player=player, role=role: world.believes_at_start(player, role),
+        player=player,
+        role=role,
+        setup_only=True,
+        pin="belief",
+    )
+
+
+def _public(build: Callable, nights: int) -> Statement:
+    return Statement(label="", nights=nights, mode="hard", build=build, setup_only=False)
+
+
+def _activation_statement(tokens: list[str], player_count: int, *, own: bool) -> Statement:
+    build, nights, ability, actor, when, target = _parse_activation(tokens, player_count)
+    public_shot = ability is Ability.SLAYER
+    if own or public_shot:
+        return Statement(
+            label="",
+            nights=nights,
+            mode="hard",
+            build=build,
+            player=actor,
+            ability=ability,
+            when=when,
+            target=target,
+            setup_only=False,
+        )
+    return Statement(
+        label="",
+        nights=nights,
+        mode="soft_ability",
+        build=build,
+        player=actor,
+        ability=ability,
+        when=when,
+        target=target,
+    )
 
 
 def _parse_activation(tokens: list[str], player_count: int) -> tuple:
     if len(tokens) < 3:
-        raise ValueError("格式：发动 <时间> <玩家> <技能> <参数>")
+        raise ValueError("格式：我发动 <时间> <玩家> <技能> <参数>")
     when, phase = _time(tokens[0])
     actor = _player(tokens[1], player_count)
     try:
@@ -271,26 +355,26 @@ def _parse_activation(tokens: list[str], player_count: int) -> tuple:
     rest = tokens[3:]
     if skill is Ability.SLAYER:
         if phase != "天" or len(rest) != 1:
-            raise ValueError("格式：发动 <天> <玩家> 猎手 <目标>")
+            raise ValueError("格式：我发动 <天> <玩家> 猎手 <目标>")
         target = _player(rest[0], player_count)
         return (
             lambda world, when=when, actor=actor, target=target: world.ability_target[Ability.SLAYER][when][
                 actor
             ][target]
-        ), when
+        ), when, skill, actor, when, target
     if skill in {Ability.IMP, Ability.MONK, Ability.POISONER, Ability.BUTLER}:
         if phase != "夜" or len(rest) != 1:
-            raise ValueError("格式：发动 <夜> <玩家> <技能> <目标>")
+            raise ValueError("格式：我发动 <夜> <玩家> <技能> <目标>")
         _night_skill_allowed(skill, when)
         target = _player(rest[0], player_count)
         return (
             lambda world, skill=skill, when=when, actor=actor, target=target: world.ability_target[skill][
                 when
             ][actor][target]
-        ), when
+        ), when, skill, actor, when, target
     if skill is Ability.RAVENKEEPER:
         if phase != "夜" or len(rest) != 2:
-            raise ValueError("格式：发动 <夜> <玩家> 守鸦人 <查看的玩家> <角色>")
+            raise ValueError("格式：我发动 <夜> <玩家> 守鸦人 <查看的玩家> <角色>")
         _night_skill_allowed(skill, when)
         target = _player(rest[0], player_count)
         role = _as_role(rest[1])
@@ -299,10 +383,10 @@ def _parse_activation(tokens: list[str], player_count: int) -> tuple:
                 world.ability_target[Ability.RAVENKEEPER][when][actor][target],
                 world.ravenkeeper_role[when][actor][role],
             )
-        ), when
+        ), when, skill, actor, when, target
     if skill is Ability.FORTUNE_TELLER:
         if phase != "夜" or len(rest) != 3 or rest[2] not in {"是", "否"}:
-            raise ValueError("格式：发动 <夜> <玩家> 占卜师 <玩家A> <玩家B> 是|否")
+            raise ValueError("格式：我发动 <夜> <玩家> 占卜师 <玩家A> <玩家B> 是|否")
         first = _player(rest[0], player_count)
         second = _player(rest[1], player_count)
         if first == second:
@@ -314,33 +398,35 @@ def _parse_activation(tokens: list[str], player_count: int) -> tuple:
                 world.fortune_second[when][actor][second],
                 world.fortune_yes[when][actor] if yes else Not(world.fortune_yes[when][actor]),
             )
-        ), when
+        ), when, skill, actor, when, None
     if skill in {Ability.WASHERWOMAN, Ability.LIBRARIAN, Ability.INVESTIGATOR}:
         if phase != "夜" or when != 1:
             raise ValueError("洗衣妇、图书管理员、调查员只在首夜")
-        return _parse_pair_info(skill, actor, rest, player_count), 1
+        return _parse_pair_info(skill, actor, rest, player_count), 1, skill, actor, when, None
     if skill is Ability.CHEF:
         if phase != "夜" or when != 1 or len(rest) != 1 or not rest[0].isdecimal():
-            raise ValueError("格式：发动 1夜 <玩家> 厨师 <数字>")
+            raise ValueError("格式：我发动 1夜 <玩家> 厨师 <数字>")
         count = int(rest[0])
         if count > player_count:
             raise ValueError(f"厨师数字不能大于玩家人数 {player_count}")
-        return (lambda world, actor=actor, count=count: world.chef_number[actor][count]), 1
+        return (
+            lambda world, actor=actor, count=count: world.chef_number[actor][count]
+        ), 1, skill, actor, when, None
     if skill is Ability.EMPATH:
         if phase != "夜" or len(rest) != 1 or rest[0] not in {"0", "1", "2"}:
-            raise ValueError("格式：发动 <夜> <玩家> 共情者 <0、1或2>")
+            raise ValueError("格式：我发动 <夜> <玩家> 共情者 <0、1或2>")
         count = int(rest[0])
         return (
             lambda world, when=when, actor=actor, count=count: world.empath_number[when][actor][count]
-        ), when
+        ), when, skill, actor, when, None
     if skill is Ability.UNDERTAKER:
         if phase != "夜" or len(rest) != 1:
-            raise ValueError("格式：发动 <夜> <玩家> 送葬者 <角色>")
+            raise ValueError("格式：我发动 <夜> <玩家> 送葬者 <角色>")
         _night_skill_allowed(skill, when)
         role = _as_role(rest[0])
         return (
             lambda world, when=when, actor=actor, role=role: world.undertaker_role[when][actor][role]
-        ), when
+        ), when, skill, actor, when, None
     raise ValueError(f"尚未支持的技能：{tokens[2]}")
 
 
@@ -422,6 +508,192 @@ def _as_role(token: str) -> Role:
         return role_from_name(_ALIASES.get(token, token))
     except KeyError as error:
         raise ValueError(str(error)) from error
+
+
+def _reason(
+    counts: tuple[int, int, int, int],
+    nights: int,
+    statements: list[Statement],
+) -> list[str] | None:
+    player_count = sum(counts)
+    world = declare_variables(player_count, n_nights=nights, tag="reason")
+    solver = world.build_solver()
+    solver.set("timeout", 30000)
+    beliefs: list[tuple[int, Role]] = []
+    pinned: list[tuple[int, Role]] = []
+    absent: list[Role] = []
+    drunks: list[int] = []
+    soft_roles: list[tuple[int, Role]] = []
+    soft_abilities: list[AbilityObservation] = []
+    trusted_abilities: list[AbilityObservation] = []
+    propositions: list[tuple] = []
+    try:
+        add_game_rules(solver, world, *counts)
+        for statement in statements:
+            _collect_statement(
+                world,
+                statement,
+                beliefs,
+                pinned,
+                absent,
+                drunks,
+                soft_roles,
+                soft_abilities,
+                trusted_abilities,
+                propositions,
+            )
+    except ValueError as error:
+        print(f"输入错误：{error}", file=sys.stderr)
+        return None
+
+    solver.push()
+    for expr, _label in propositions:
+        solver.add(expr)
+    status = solver.check()
+    if status == unknown:
+        print("推理超时，未能确定。")
+        return None
+    if status == unsat:
+        solver.pop()
+        try:
+            subset = minimal_unsatisfiable_subset(solver, propositions)
+        except TimeoutError:
+            print("推理超时，未能确定矛盾来自哪些命题。")
+            return None
+        return ["存在矛盾", *subset]
+
+    possible = _possible_roles(solver, world)
+    if possible is None:
+        print("推理超时，未能确定。")
+        return None
+    if any(not roles for roles in possible):
+        lines = ["存在矛盾"]
+        for index, roles in enumerate(possible, start=1):
+            if not roles:
+                lines.append(f"玩家 {index} 无法为任何身份")
+        return lines
+
+    probabilities = estimate_role_probabilities(
+        player_count,
+        counts,
+        beliefs=beliefs,
+        pinned_roles=pinned,
+        absent_roles=absent,
+        drunk_players=drunks,
+        soft_roles=soft_roles,
+        soft_abilities=soft_abilities,
+        trusted_abilities=trusted_abilities,
+        solver=solver,
+        world=world,
+    )
+    if probabilities is None:
+        lines = ["没有抽到可行世界，因此只列出可能身份。"]
+    else:
+        lines = ["概率是各组权重乘各局的干扰乘数，再按这些乘积合计归一。逻辑上无解的组不计入。"]
+    for index, roles in enumerate(possible, start=1):
+        player_probability = None if probabilities is None else probabilities[index - 1]
+        lines.append(_format_player(index, roles, player_probability))
+    return lines
+
+
+def _collect_statement(
+    world: TroubleBrewingVars,
+    statement: Statement,
+    beliefs: list[tuple[int, Role]],
+    pinned: list[tuple[int, Role]],
+    absent: list[Role],
+    drunks: list[int],
+    soft_roles: list[tuple[int, Role]],
+    soft_abilities: list[AbilityObservation],
+    trusted_abilities: list[AbilityObservation],
+    propositions: list[tuple],
+) -> None:
+    if statement.mode == "soft_role":
+        assert statement.player is not None and statement.role is not None
+        soft_roles.append((statement.player, statement.role))
+        return
+    assert statement.build is not None
+    claim = statement.build(world)
+    if statement.mode == "soft_ability":
+        assert statement.player is not None and statement.ability is not None and statement.when is not None
+        soft_abilities.append(
+            AbilityObservation(
+                statement.player,
+                statement.ability,
+                statement.when,
+                claim,
+                statement.target,
+            )
+        )
+        return
+    if statement.pin == "belief":
+        assert statement.player is not None and statement.role is not None
+        beliefs.append((statement.player, statement.role))
+        propositions.append((claim, statement.label))
+        return
+    if statement.pin == "role":
+        assert statement.player is not None and statement.role is not None
+        pinned.append((statement.player, statement.role))
+        propositions.append((claim, statement.label))
+        return
+    if statement.pin == "absent":
+        assert statement.role is not None
+        absent.append(statement.role)
+        propositions.append((claim, statement.label))
+        return
+    if statement.pin == "drunk":
+        assert statement.player is not None
+        drunks.append(statement.player)
+        propositions.append((claim, statement.label))
+        return
+    if statement.ability is None:
+        propositions.append((claim, statement.label))
+        return
+    assert statement.player is not None and statement.when is not None
+    observation = AbilityObservation(
+        statement.player,
+        statement.ability,
+        statement.when,
+        claim,
+        statement.target,
+    )
+    propositions.append((trusted_activation(world, observation), statement.label))
+    if statement.ability is Ability.SLAYER:
+        return
+    trusted_abilities.append(observation)
+    if statement.ability is Ability.IMP:
+        if statement.when == 2:
+            pinned.append((statement.player, Role.IMP))
+        return
+    beliefs.append((statement.player, Role(statement.ability.value)))
+
+
+def _format_player(index: int, roles: list[Role], probs: dict[Role, float] | None) -> str:
+    if not probs:
+        names = "、".join(ROLE_ZH[role] for role in roles)
+        return f"玩家 {index}：{names}"
+    total = sum(probs.get(role, 0.0) for role in roles)
+    if total <= 0:
+        names = "、".join(ROLE_ZH[role] for role in roles)
+        return f"玩家 {index}：{names}"
+    weighted = sorted(
+        ((role, probs.get(role, 0.0) / total) for role in roles),
+        key=lambda item: (-item[1], _ROLE_ORDER.index(item[0])),
+    )
+    shown = [(role, share) for role, share in weighted if share >= 0.005]
+    rest = sum(share for _role, share in weighted if share < 0.005)
+    omitted = len(weighted) - len(shown)
+    if not shown:
+        shown = weighted[:3]
+        rest = sum(share for _role, share in weighted[3:])
+        omitted = max(0, len(weighted) - len(shown))
+    parts = [f"{ROLE_ZH[role]} {share * 100:.1f}%" for role, share in shown]
+    text = "、".join(parts)
+    if omitted and rest >= 0.005:
+        text += f"（其余 {omitted} 个可能身份合计 {rest * 100:.1f}%）"
+    elif omitted:
+        text += f"（另有 {omitted} 个可能身份未进入本次抽样）"
+    return f"玩家 {index}：{text}"
 
 
 def _possible_roles(solver: Solver, world: TroubleBrewingVars) -> list[list[Role]] | None:

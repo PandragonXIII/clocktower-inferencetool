@@ -22,6 +22,11 @@ from botc_reasoner.roles import (
     setup_counts,
 )
 from botc_reasoner.conflict import minimal_unsatisfiable_subset
+from botc_reasoner.probability import (
+    AbilityObservation,
+    estimate_role_probabilities,
+    trusted_activation,
+)
 from botc_reasoner.rules import add_game_rules, add_setup_rules
 from botc_reasoner.variables import (
     MAX_PLAYERS,
@@ -53,10 +58,13 @@ __all__ = [
     "TOWNSFOLK",
     "TroubleBrewingVars",
     "Ability",
+    "AbilityObservation",
     "Alignment",
     "Category",
     "add_game_rules",
     "add_setup_rules",
+    "estimate_role_probabilities",
+    "trusted_activation",
     "alignment_of",
     "category_of",
     "declare_variables",
