@@ -58,6 +58,7 @@ function fields(parent, entries) {
   parent.append(dl);
 }
 function render(selectedTime) {
+  window.GlobalAssumptions.sync(currentRequest);
   window.NightDeaths.sync(epoch);
   window.DayVoting.sync(epoch);
   const request = object(currentRequest), game = object(request.game), response = object(currentResponse);
@@ -184,7 +185,9 @@ function prepareQueries() {
     let id = base, suffix = 0; while (used.has(id)) id = `${base}-${++suffix}`;
     used.add(id); next.queries.push({ id, proposition: structuredClone(p) });
   };
-  list(r.game.players).forEach((p) => ["good", "evil"].forEach((alignment) => add({ kind: "alignment", player_id: p.id, alignment, time })));
+   list(r.game.players).forEach((p) => ["good", "evil"].forEach((alignment) => add({ kind: "alignment", player_id: p.id, alignment, time })));
+   list(r.game.players).forEach((player) => window.AssumptionTimeline.candidates(r, player.id, time).forEach((a) => add({ ...a.proposition, time: structuredClone(time) })));
+   list(r.game.players).forEach((player) => window.AssumptionTimeline.reportedCandidates(r, player.id, time).forEach((f) => add({ ...f.proposition, time: structuredClone(time) })));
   [...list(r.facts), ...list(r.assumptions)].forEach((entry) => {
     const p = entry.proposition;
     if (entry.enabled === true && ["role", "alignment"].includes(p?.kind) && window.PlayerActions.timeIndex(p.time) === window.PlayerActions.timeIndex(time)) add(p);
@@ -385,11 +388,71 @@ window.App = {
   },
   get reasonState() { return { busy: requestBusy, pending: requestBusy && pendingTicket === epoch, error: errorTicket === epoch ? reasonError : undefined }; },
   isReasonResponse(response, request) { return validReason(response) && matchesRequest(response, request); },
+  addGlobalAssumption(roleId, time, expectedRequestId) {
+    if (currentRequest?.request_id !== expectedRequestId) throw new Error("对局已改变，请重新打开新增假设窗口。");
+    if (!Object.hasOwn(window.ClocktowerRoles.names, roleId)) throw new Error("请选择暗流涌动角色。");
+    const rank = window.PlayerActions.timeIndex;
+    if (!time || !["setup", "night", "day"].includes(time.phase) || (time.phase !== "setup" && (!Number.isInteger(time.number) || time.number < 1 || time.number > 99)) || rank(time) > rank(currentRequest.game.time)) throw new Error("请选择不晚于当前对局进度的有效时间。");
+    if (list(currentRequest.facts).some((f) => f.type === "botc:global_assumption" && f.data?.kind === "role_absent" && f.data.role_id === roleId && rank(f.data.time) === rank(time))) throw new Error("这个时点已有相同角色不在场假设，请使用已有卡片的开关。");
+    return mutateRequest((r) => {
+      r.facts.push({ id: uniqueId("a-global"), type: "botc:global_assumption", status: "reported", enabled: false, data: { kind: "role_absent", role_id: roleId, time: structuredClone(time), requested_enabled: true } });
+    });
+  },
+  setGlobalAssumptionEnabled(id, enabled) {
+    return mutateRequest((r) => { const f = r.facts.find((v) => v.id === id && v.type === "botc:global_assumption"); if (!f) throw new Error("全局假设已不存在。"); f.data.requested_enabled = Boolean(enabled); f.enabled = false; });
+  },
+  removeGlobalAssumption(id) {
+    return mutateRequest((r) => { r.facts = r.facts.filter((f) => !(f.id === id && f.type === "botc:global_assumption")); });
+  },
   addAssumption(playerId, roleId, time) {
     return mutateRequest((r) => {
       validateRoleInput(r, playerId, roleId, time);
       r.assumptions.push({ id: uniqueId("a"), enabled: true, proposition: { kind: "role", player_id: playerId, role_id: roleId, time: structuredClone(time) } });
     }, time);
+  },
+  editIdentity(id, proposition, expected) {
+    if (currentRequest?.request_id !== expected) throw new Error("对局已改变，请重新打开编辑窗口。");
+    return mutateRequest((r) => {
+      if (proposition.kind === "role") validateRoleInput(r, proposition.player_id, proposition.role_id, proposition.time);
+      else validateAlignmentInput(r, proposition.player_id, proposition.alignment, proposition.time);
+      const a = r.assumptions.find((v) => v.id === id), f = r.facts.find((v) => v.id === id && ["role", "alignment"].includes(v.type));
+      if (!a && !f) throw new Error("记录已不存在。");
+      if (a?.extensions?.["ui:observation_id"]) throw new Error("动作关联身份请通过编辑动作修改，或另建手工假设。");
+      (a || f).proposition = structuredClone(proposition); if (f) f.type = proposition.kind;
+    });
+  },
+  setIdentityEnabled(id, enabled) {
+    return mutateRequest((r) => { const entry = r.assumptions.find((a) => a.id === id) || r.facts.find((f) => f.id === id && ["role", "alignment"].includes(f.type)); if (!entry) throw new Error("记录已不存在。"); entry.enabled = Boolean(enabled); });
+  },
+  removeIdentity(id) {
+    return mutateRequest((r) => { r.assumptions = r.assumptions.filter((a) => a.id !== id); r.facts = r.facts.filter((f) => !(f.id === id && ["role", "alignment"].includes(f.type))); r.facts.forEach((f) => { for (const key of ["ui:assumption_id", "ui:identity_fact_id"]) if (f.extensions?.[key] === id) delete f.extensions[key]; }); });
+  },
+  editNightDeaths(id, playerIds, result, expected) {
+    if (currentRequest?.request_id !== expected) throw new Error("对局已改变，请重新编辑。");
+    const updated = mutateRequest((r) => {
+      const f = r.facts.find((v) => v.id === id && v.type === "botc:night_deaths"); if (!f) throw new Error("死亡记录已不存在。");
+      if (!Array.isArray(playerIds) || new Set(playerIds).size !== playerIds.length || !["none", "deaths"].includes(result) || (result === "none" ? playerIds.length !== 0 : playerIds.length === 0)) throw new Error("请选择死亡玩家或明确选择无人死亡。");
+      const earlier = window.NightDeaths.deadAt(r.facts.filter((v) => v.id !== id), f.data.time);
+      playerIds.forEach((p) => { validatePlayerTime(r, p, f.data.time); if (earlier.has(p)) throw new Error("该玩家此前已死亡，不能重复记录。"); });
+      f.data.player_ids = [...playerIds]; f.data.result = result;
+    });
+    const issues = [];
+    list(updated.facts).filter((f) => f.type === "botc:day_vote").forEach((f) => {
+      const dead = window.NightDeaths.deadAt(updated.facts.filter((v) => v.id !== f.id), f.data.time);
+      if (list(f.data.nominations).some((n) => dead.has(n.nominator_id))) issues.push(`第 ${f.data.time.number} 天存在已死亡提名者`);
+      const count = updated.game.players.filter((p) => !dead.has(p.id)).length;
+      if (f.data.alive_count !== count) issues.push(`第 ${f.data.time.number} 天投票人数或阈值需复核`);
+    });
+    window.NightDeaths.records(updated.facts).forEach((f) => {
+      const prior = window.NightDeaths.deadAt(updated.facts.filter((v) => v.id !== f.id), f.data.time);
+      if (list(f.data.player_ids).some((p) => prior.has(p))) issues.push(`第 ${f.data.time.number} 夜存在重复死亡记录`);
+    });
+    if (issues.length) notify(`死亡记录已修改；请复核后续记录：${[...new Set(issues)].join("；")}。未自动重写投票或处决结果。`, true);
+    return updated;
+  },
+  editAbility(id, data, expected) {
+    if (currentRequest?.request_id !== expected) throw new Error("对局已改变，请重新编辑动作。");
+    return window.App.recordAbility(data, undefined, id);
   },
   addAlignmentAssumption(playerId, alignment, time) {
     return mutateRequest((r) => {
@@ -397,7 +460,7 @@ window.App = {
       r.assumptions.push({ id: uniqueId("a"), enabled: true, proposition: { kind: "alignment", player_id: playerId, alignment, time: structuredClone(time) } });
     }, time);
   },
-  recordAbility(data, expected) {
+  recordAbility(data, expected, replaceId) {
     if (expected !== undefined) {
       assertVoting(expected, "settled");
       if (JSON.stringify(data.time) !== JSON.stringify(currentRequest.game.time)) throw new Error("结算技能必须记录在当前白天。");
@@ -406,9 +469,27 @@ window.App = {
       const skill = window.ClocktowerSkills.all.find((s) => s.id === data.ability_id && s.role_id === data.role_id);
       validateRoleInput(r, data.actor_id, data.role_id, data.time);
       window.ClocktowerSkills.validate(skill, data, r.game.players);
-      const factId = uniqueId("f-ability"), assumptionId = uniqueId("a-ability");
-      r.facts.push({ id: factId, type: "botc:ability_observation", status: "confirmed", enabled: false, data: structuredClone(data), extensions: { "ui:assumption_id": assumptionId } });
-      r.assumptions.push({ id: assumptionId, enabled: true, proposition: { kind: "role", player_id: data.actor_id, role_id: data.role_id, time: structuredClone(data.time) }, extensions: { "ui:observation_id": factId } });
+      if (replaceId) {
+        const old = r.facts.find((f) => f.id === replaceId && f.type === "botc:ability_observation"); if (!old) throw new Error("动作已不存在。");
+        r.facts = r.facts.filter((f) => f.id !== replaceId);
+        r.assumptions = r.assumptions.filter((a) => {
+          if (a.id !== old.extensions?.["ui:assumption_id"] || a.extensions?.["ui:observation_id"] !== replaceId) return true;
+          const other = r.facts.find((f) => f.extensions?.["ui:assumption_id"] === a.id);
+          if (!other) return false;
+          a.extensions["ui:observation_id"] = other.id; delete a.extensions["ui:role_transition"]; return true;
+        });
+      }
+      const factId = replaceId || uniqueId("f-ability");
+      const matchesRole = (entry) => entry.enabled === true && entry.proposition?.kind === "role" && entry.proposition.player_id === data.actor_id && entry.proposition.role_id === data.role_id;
+      const existing = r.assumptions.find(matchesRole);
+      const identityFact = !existing && r.facts.find((f) => f.type === "role" && ["reported", "confirmed"].includes(f.status) && matchesRole(f));
+      const assumptionId = existing?.id || (!identityFact ? uniqueId("a-ability") : undefined);
+      r.facts.push({ id: factId, type: "botc:ability_observation", status: "confirmed", enabled: false, data: structuredClone(data), extensions: identityFact ? { "ui:identity_fact_id": identityFact.id } : { "ui:assumption_id": assumptionId } });
+      const transformed = data.role_id === "scarlet_woman" && (data.result?.value === "occurred" || (data.result?.value === "role" && data.result.role_id === "imp"));
+      // 阶段结束状态：发动转化时已是小恶魔，女郎身份假设应落在前一阶段。
+      const rank = window.PlayerActions.timeIndex(data.time), previous = Math.max(0, rank - 1);
+      const assumptionTime = transformed ? previous === 0 ? { phase: "setup" } : { phase: previous % 2 ? "night" : "day", number: Math.ceil(previous / 2) } : structuredClone(data.time);
+      if (!existing && !identityFact) r.assumptions.push({ id: assumptionId, enabled: true, proposition: { kind: "role", player_id: data.actor_id, role_id: data.role_id, time: assumptionTime }, extensions: { "ui:observation_id": factId, ...(transformed ? { "ui:role_transition": { role_id: "imp", time: structuredClone(data.time) } } : {}) } });
     }, data.time);
   },
   setAssumptionEnabled(id, enabled) {
@@ -425,7 +506,14 @@ window.App = {
       const f = r.facts.find((v) => v.id === id && v.type === "botc:ability_observation");
       if (!f) throw new Error("动作已不存在。");
       r.facts = r.facts.filter((v) => v.id !== id);
-      r.assumptions = r.assumptions.filter((a) => !(a.id === f.extensions?.["ui:assumption_id"] && a.extensions?.["ui:observation_id"] === id));
+      r.assumptions = r.assumptions.filter((a) => {
+        if (a.id !== f.extensions?.["ui:assumption_id"] || a.extensions?.["ui:observation_id"] !== id) return true;
+        const other = r.facts.find((v) => v.type === "botc:ability_observation" && v.extensions?.["ui:assumption_id"] === a.id);
+        if (!other) return false;
+        a.extensions["ui:observation_id"] = other.id;
+        delete a.extensions["ui:role_transition"];
+        return true;
+      });
     });
   },
   startGame(request) {

@@ -52,7 +52,7 @@ window.PlayerActions = (() => {
       const block = el("div", undefined, "evidence");
       block.append(el("p", `${window.ClocktowerSkills.all.find((s) => s.id === f.data.ability_id)?.name || f.data.ability_id} · ${timeName(f.data.time)}`), el("p", "已记录，技能结果尚未参与推理", "warning"));
       const raw = el("details"); raw.append(el("summary", "目标、结果、备注及完整数据"), el("pre", JSON.stringify(f, null, 2))); block.append(raw);
-      block.append(button("删除动作及专用假设", () => mutate(() => window.App.removeAbility(f.id)))); body.append(block);
+      block.append(button("删除动作（保留共用身份）", () => mutate(() => window.App.removeAbility(f.id)))); body.append(block);
     });
     if (focus) body.querySelector("button")?.focus();
   }
@@ -65,9 +65,10 @@ window.PlayerActions = (() => {
     const form = el("form"); form.noValidate = true; body.append(form);
     const phase = select([["setup", "初始配置 setup"], ["night", "夜 night"], ["day", "天 day"]]); phase.value = context.time.phase;
     const number = el("input"); number.type = "number"; number.min = "1"; number.max = "99"; number.step = "1"; number.value = String(context.time.number || 1);
-    field(form, "记录时点", phase); const numberWrap = field(form, "阶段编号（1–99）", number).parentElement;
+    const numberWrap = el("div");
+    form.append(el("p", `记录时点：${timeName(context.time)}（固定）`, "hint"));
     if (context.onClose) { phase.disabled = true; number.disabled = true; }
-    const sync = el("p", "", "hint"); sync.setAttribute("aria-live", "polite"); form.append(sync);
+    const sync = el("p", "", "hint");
     const readTime = () => {
       if (phase.value === "setup") return { phase: "setup" };
       const n = Number(number.value); if (!Number.isInteger(n) || n < 1 || n > 99) throw new Error("阶段编号须为 1–99 的正整数。");
@@ -98,7 +99,7 @@ window.PlayerActions = (() => {
     const updatePreview = () => {
       if (ability) {
         const role = skill?.role_id;
-        preview.textContent = role ? `将假设该玩家为${names[role]}。每次动作创建独立关联假设；仅最终保存生效，取消不保存。技能结果不参与推理。` : "请选择后预览身份假设。";
+        preview.textContent = role ? `对应身份：${names[role]}。保存时优先复用同一玩家已有的有效身份假设或声明，不重复创建；没有时才添加假设。取消不保存，技能结果不参与推理。` : "请选择后预览身份假设。";
         return;
       }
       if (kindSelect.value === "alignment") preview.textContent = `将假设该玩家为${alignmentSelect.value === "good" ? "善良" : "邪恶"}阵营。仅为临时假设，不是已确认阵营，也不会据此推断身份。`;
@@ -137,7 +138,7 @@ window.PlayerActions = (() => {
       if (m.kind === "number") { valueControl = el("input"); valueControl.type = "number"; valueControl.min = "0"; valueControl.max = String(m.max === "players" ? context.request.game.players.length : m.max); valueControl.step = "1"; field(resultBox, "观察数量", valueControl); }
       if (m.kind === "text") { valueControl = el("textarea"); valueControl.rows = 6; field(resultBox, "完整魔典信息（多行文本）", valueControl); }
       if (["role", "number", "text"].includes(m.kind)) { unobserved = el("input"); unobserved.type = "checkbox"; field(resultBox, "未观察到结果", unobserved); unobserved.addEventListener("change", () => { valueControl.disabled = unobserved.checked; }); }
-      if (skill.optionalRole) { extraRole = field(resultBox, "转化后的角色（结果为转化角色时必选）", roleSelect()); }
+      if (skill.optionalRole) { extraRole = field(resultBox, "转化后的角色（暗流涌动：小恶魔）", roleSelect(["imp"])); }
       if (m.kind === "none") resultBox.append(el("p", "无直接结果；可在备注中记录相关观察。", "hint"));
       const updateBranch = () => { const empty = branch?.value === "none"; targetBox.hidden = empty; resultBox.hidden = empty; if (empty) targets.forEach((t) => { t.checked = false; }); };
       branch?.addEventListener("change", updateBranch);
@@ -180,18 +181,37 @@ window.PlayerActions = (() => {
           if (!skill) throw new Error("请选择技能。");
           const data = { actor_id: context.actor.id, role_id: skill.role_id, ability_id: skill.id, time, targets: targets.filter((c) => c.checked).map((c) => c.value), result: resultRead(), note: note.value };
           window.ClocktowerSkills.validate(skill, data, context.request.game.players);
-          request = context.onClose ? window.DayVoting.perform(() => window.App.recordAbility(data, context.expected)) : window.App.recordAbility(data);
+          request = context.editId ? window.App.editAbility(context.editId, data, context.request.request_id) : context.onClose ? window.DayVoting.perform(() => window.App.recordAbility(data, context.expected)) : window.App.recordAbility(data);
         } else if (kindSelect.value === "alignment") {
-          request = window.App.addAlignmentAssumption(context.actor.id, alignmentSelect.value, time);
+          request = context.editId ? window.App.editIdentity(context.editId, { kind: "alignment", player_id: context.actor.id, alignment: alignmentSelect.value, time }, context.request.request_id) : window.App.addAlignmentAssumption(context.actor.id, alignmentSelect.value, time);
         } else {
           if (!names[choice.value]) throw new Error("请选择身份。");
-          request = window.App.addAssumption(context.actor.id, choice.value, time);
+          request = context.editId ? window.App.editIdentity(context.editId, { kind: "role", player_id: context.actor.id, role_id: choice.value, time }, context.request.request_id) : window.App.addAssumption(context.actor.id, choice.value, time);
         }
         if (context.onComplete) { const complete = context.onComplete; context.onClose = undefined; close(); complete(request); return; }
-        context.request = request; context.time = time; window.Roundtable.selectTime(timeIndex(time)); home();
+        context.request = request; context.time = time; delete context.editId; delete context.editEntry; window.Roundtable.selectTime(timeIndex(time)); home();
       } catch (e) { error.textContent = e.message; error.tabIndex = -1; error.focus(); }
     });
-    phase.focus();
+    if (context.editEntry) {
+      const entry = context.editEntry;
+      if (!ability) {
+        const p = entry.proposition; kindSelect.value = p.kind; choice.value = p.role_id || ""; alignmentSelect.value = p.alignment || "good"; updateKind();
+      } else {
+        const d = entry.data; choice.value = d.ability_id; choice.dispatchEvent(new Event("change")); note.value = d.note || "";
+        controls.querySelectorAll('input[name="ability-target"]').forEach((c) => { c.checked = d.targets.includes(c.value); });
+        const result = d.result || {};
+        const labels = [...controls.querySelectorAll("label.action-field")];
+        const find = (text) => labels.find((l) => l.querySelector("span")?.textContent === text)?.querySelector("select,input,textarea");
+        if (result.kind === "no_outsiders") { const branch = find("获知分支"); if (branch) { branch.value = "none"; branch.dispatchEvent(new Event("change")); } }
+        if (result.kind === "role") { const c = find("获知 / 表象角色"); if (c) c.value = result.role_id; }
+        if (result.kind === "choice") { const c = find("观察结果"); if (c) c.value = result.value; const role = find("转化后的角色（暗流涌动：小恶魔）"); if (role) role.value = result.role_id || ""; }
+        if (result.kind === "number") { const c = find("观察数量"); if (c) c.value = result.value; }
+        if (result.kind === "text") { const c = find("完整魔典信息（多行文本）"); if (c) c.value = result.text; }
+        if (result.kind === "unobserved") { const c = find("未观察到结果"); if (c) { c.checked = true; c.dispatchEvent(new Event("change")); } }
+      }
+      save.textContent = "保存修改";
+    }
+    (kindSelect || choice).focus();
   }
   function open(request, actor, selectedTime) {
     init(); context = { request: structuredClone(request), actor, time: timeFrom(selectedTime) }; opener = actor.id; home(false); dialog.showModal(); body.querySelector("button")?.focus();
@@ -200,5 +220,13 @@ window.PlayerActions = (() => {
     init(); close(); context = { request: structuredClone(request), actor, time: structuredClone(time), expected, onComplete, onClose }; opener = actor.id;
     title(); dialog.showModal(); editor(true);
   }
-  return { open, openAbility, close, timeIndex };
+   function edit(request, entry) {
+     init(); close();
+     const ability = entry.type === "botc:ability_observation", p = ability ? entry.data : entry.proposition;
+     const actor = request.game.players.find((v) => v.id === (ability ? p.actor_id : p.player_id));
+     if (!actor) return;
+     context = { request: structuredClone(request), actor, time: structuredClone(p.time), editId: entry.id, editEntry: structuredClone(entry) }; opener = actor.id;
+     title(); dialog.showModal(); editor(ability);
+   }
+   return { open, openAbility, edit, close, timeIndex };
 })();

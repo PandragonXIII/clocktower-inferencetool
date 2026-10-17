@@ -14,6 +14,7 @@ window.Roundtable = (() => {
   let selectedTime = 0, selectedPlayer, gameId, lastRequest, lastResponse;
 
   function records(players, assumptions, facts) {
+    const identityEntries = [...assumptions, ...facts.filter((f) => f.status === "reported" && ["role", "alignment"].includes(f.type))];
     const section = el("section", undefined, "game-records"); section.setAttribute("aria-labelledby", "records-title");
     const title = el("h3", "假设与动作"); title.id = "records-title"; section.append(title);
     section.append(el("p", "当前对局全部时点的记录，包含停用假设；不随圆桌玩家或展示时间切换。身份后的 ? 表示假设，不是已确认身份。", "hint"));
@@ -29,22 +30,25 @@ window.Roundtable = (() => {
       const b = el("button", label); b.type = "button"; b.dataset.focus = `delete-${id}`;
       b.addEventListener("click", () => mutate(action)); card.append(b);
     };
-    section.append(el("h4", `身份 / 阵营假设 · ${assumptions.length}`));
+    section.append(window.GlobalAssumptions.cards(facts));
+    section.append(el("h4", `身份 / 阵营假设 · ${identityEntries.length}`));
     const list = el("div", undefined, "record-list"); section.append(list);
-    if (!assumptions.length) list.append(el("p", "暂无身份假设。点击圆桌玩家，选择“假设”添加。", "empty"));
-    assumptions.forEach((a) => {
+    if (!identityEntries.length) list.append(el("p", "暂无身份假设。点击圆桌玩家，选择“假设”添加。", "empty"));
+    identityEntries.forEach((a) => {
       const p = obj(a.proposition), enabled = a.enabled === true, time = timeName(index(p.time));
       const name = value(p) === undefined ? "其他命题假设" : `${valueName(p.kind, value(p))} ?`;
       const card = el("article", undefined, "evidence record-card"); card.dataset.assumption = a.id;
       const head = el("div", undefined, "record-head"), copy = el("div", undefined, "record-copy");
       copy.append(el("h5", `${name}${p.kind === "alignment" ? " · 阵营假设" : ""}`), el("p", `${playerName(p.player_id)} ｜ ${time}`));
       const observationId = obj(a.extensions)["ui:observation_id"];
-      copy.append(el("p", `${observationId ? `来源：动作关联 · ${observationId}` : "来源：手工"} · ${enabled ? "已启用" : "已停用，不参与"}`, "hint"));
+      copy.append(el("p", `${a.status === "reported" ? "来源：身份声明（reported，非硬约束）" : observationId ? `来源：动作关联 · ${observationId}` : "来源：手工"} · ${enabled ? "已启用" : "已停用，不参与"}`, "hint"));
       const label = el("label", undefined, "assumption-switch"), check = el("input"); check.type = "checkbox"; check.setAttribute("role", "switch"); check.checked = enabled; check.dataset.focus = `assumption-${a.id}`;
       check.setAttribute("aria-label", `${enabled ? "停用" : "启用"} ${playerName(p.player_id)} 在${time}的${value(p) === undefined ? name : valueName(p.kind, value(p))}${p.kind === "alignment" ? "阵营" : "身份"}假设`);
-      check.addEventListener("change", () => mutate(() => window.App.setAssumptionEnabled(a.id, check.checked), () => { check.checked = enabled; }));
+      check.addEventListener("change", () => mutate(() => window.App.setIdentityEnabled(a.id, check.checked), () => { check.checked = enabled; }));
       const track = el("span", undefined, "switch-track"); track.setAttribute("aria-hidden", "true"); label.append(check, track, el("span", enabled ? "已启用" : "已停用")); head.append(copy, label); card.append(head);
-      remove(card, "删除假设", () => window.App.removeAssumption(a.id), a.id); raw(card, a); list.append(card);
+      if (!observationId) remove(card, "编辑", () => window.PlayerActions.edit(lastRequest, a), `edit-${a.id}`);
+      else { const observation = facts.find((f) => f.id === observationId); if (observation) remove(card, "编辑关联动作", () => window.PlayerActions.edit(lastRequest, observation), `edit-${a.id}`); }
+      remove(card, "删除假设", () => window.App.removeIdentity(a.id), a.id); raw(card, a); list.append(card);
     });
     const actions = facts.filter((f) => f.type === "botc:ability_observation");
     section.append(el("h4", `动作观察 · ${actions.length}`));
@@ -66,9 +70,11 @@ window.Roundtable = (() => {
         default: resultText = "未识别的结果类型，请展开完整来源数据";
       }
       card.append(el("p", `结果：${resultText || "未提供"}`, "observation-result"), el("p", `备注：${data.note || "无"}`), el("p", "已记录，技能结果尚未参与推理", "warning"));
-      const linked = assumptions.filter((a) => a.id === obj(f.extensions)["ui:assumption_id"] && obj(a.extensions)["ui:observation_id"] === f.id);
-      card.append(el("p", linked.length ? `关联身份假设：${linked.map((a) => `${roles[obj(a.proposition).role_id] || obj(a.proposition).role_id} ? · ${a.enabled === true ? "已启用" : "已停用"}`).join("、")}（开关仅控制假设，不启用技能结果）` : "关联身份假设：无（未关联或已删除）", "hint"));
-      remove(card, "删除动作及专用假设", () => window.App.removeAbility(f.id), f.id); raw(card, f); actionList.append(card);
+      const linked = assumptions.filter((a) => a.id === obj(f.extensions)["ui:assumption_id"]);
+      const identity = facts.find((v) => v.id === obj(f.extensions)["ui:identity_fact_id"] && v.type === "role");
+      card.append(el("p", linked.length ? `关联身份假设：${linked.map((a) => `${roles[obj(a.proposition).role_id] || obj(a.proposition).role_id} ? · ${a.enabled === true ? "已启用" : "已停用"}`).join("、")}（可能被多个动作共用）` : identity ? `复用已有${identity.status === "reported" ? "身份声明" : "确认身份"}：${roles[obj(identity.proposition).role_id] || obj(identity.proposition).role_id}（未新增假设，记录性质不变）` : "关联身份记录：无（未关联或已删除）", "hint"));
+      remove(card, "编辑动作", () => window.PlayerActions.edit(lastRequest, f), `edit-${f.id}`);
+      remove(card, "删除动作（保留共用身份）", () => window.App.removeAbility(f.id), f.id); raw(card, f); actionList.append(card);
     });
     const deaths = window.NightDeaths.records(facts);
     section.append(el("h4", `死亡记录 · ${deaths.length}`));
@@ -77,6 +83,7 @@ window.Roundtable = (() => {
     deaths.forEach((f) => {
       const d = obj(f.data), card = el("article", undefined, "evidence record-card"); card.dataset.death = f.id;
       card.append(el("h5", `${timeName(index(d.time))}死亡`), el("p", d.result === "none" ? "无人死亡" : arr(d.player_ids).map(playerName).join("、") || "未识别的死亡记录，请查看完整数据"), el("p", "死亡已记录，尚未参与推理", "warning"));
+      remove(card, "编辑死亡记录", () => window.NightDeaths.open(lastRequest, window.App.votingContext, f), `edit-${f.id}`);
       raw(card, f); deathList.append(card);
     });
     const votes = window.DayVoting.records(facts);
@@ -145,8 +152,8 @@ window.Roundtable = (() => {
       });
       const confirmed = fs.filter((f) => f.enabled === true && f.status === "confirmed" && f.type === obj(f.proposition).kind);
       const determinations = [...confirmed.map((f) => ({ ...f, origin: "已确认输入" })), ...conclusions];
-      const reported = fs.filter((f) => f.enabled === true && f.status === "reported" && f.type === obj(f.proposition).kind);
-      const activeAssumptions = as.filter((a) => a.enabled === true);
+      const reported = window.AssumptionTimeline.reportedCandidates(r, p.id, selectedTime === 0 ? { phase: "setup" } : { phase: selectedTime % 2 ? "night" : "day", number: Math.ceil(selectedTime / 2) });
+      const activeAssumptions = window.AssumptionTimeline.candidates(r, p.id, selectedTime === 0 ? { phase: "setup" } : { phase: selectedTime % 2 ? "night" : "day", number: Math.ceil(selectedTime / 2) });
       const candidates = [...reported, ...activeAssumptions];
       const values = (entries, kind) => [...new Set(entries.filter((f) => obj(f.proposition).kind === kind).map((f) => value(obj(f.proposition))).filter((v) => v !== undefined))];
       const rs = values(determinations, "role"), als = values(determinations, "alignment"), crs = values(candidates, "role"), cas = values(candidates, "alignment");
@@ -154,10 +161,12 @@ window.Roundtable = (() => {
       const alignment = !conflict && als.length === 1 ? als[0] : "unknown";
       // 仅当没有确定阵营、也没有显式阵营候选时，才把启用中“角色假设”的暗流固有
       // 阵营作为展示性的“不确定默认阵营”（斜纹）。它不写入 confirmed、不生成任何
-      // 隐含 alignment 约束，也不作用于玩家声明；显式 alignment 候选优先。角色假设
-      // 已按所选时点过滤，切换时点不会错误沿用。
-      const assumptionRoles = values(activeAssumptions, "role");
-      const roleDefaults = [...new Set(assumptionRoles.map((r) => window.ClocktowerRoles.defaultAlignments[r]).filter(Boolean))];
+       // 隐含 alignment 约束；初始身份声明也提供同样的默认色，显式 alignment 候选优先。
+       // 候选由时间线处理器负责共享与角色变化边界。
+       const assumptionRoles = values(activeAssumptions, "role");
+       const initialReportedRoles = values(reported.filter((f) => obj(obj(f.proposition).time).phase === "setup"), "role");
+       const roleDefaults = [...new Set([...assumptionRoles, ...initialReportedRoles].map((r) => window.ClocktowerRoles.defaultAlignments[r]).filter(Boolean))];
+       const defaultOrigin = assumptionRoles.length && initialReportedRoles.length ? "按角色候选" : assumptionRoles.length ? "按角色假设" : "按身份声明";
       const roleDerived = !cas.length && roleDefaults.length > 0;
       const pendingValues = cas.length ? cas : roleDefaults;
       const pending = !conflict && !als.length && pendingValues.length > 0;
@@ -168,7 +177,7 @@ window.Roundtable = (() => {
       button.setAttribute("aria-pressed", String(selectedPlayer === p.id)); button.setAttribute("aria-haspopup", "dialog");
       const roleText = conflict ? "信息冲突" : rs.length === 1 ? valueName("role", rs[0]) : crs.length === 1 ? `${valueName("role", crs[0])} ?` : crs.length > 1 ? "身份待定 ?" : "?";
       const alignmentText = conflict ? "请核对信息来源" : alignment !== "unknown" ? valueName("alignment", alignment) : pending ? pendingValues.length === 1 ? `${valueName("alignment", pendingValues[0])}？` : "阵营待定" : "阵营未知";
-      const candidateText = [crs.length ? `身份候选：${crs.map((v) => valueName("role", v)).join("、")}` : "", cas.length ? `阵营候选：${cas.map((v) => valueName("alignment", v)).join("、")}` : roleDerived ? `按角色假设推定默认阵营（不确定）：${roleDefaults.map((v) => valueName("alignment", v)).join("、")}` : ""].filter(Boolean).join("；");
+       const candidateText = [crs.length ? `身份候选：${crs.map((v) => valueName("role", v)).join("、")}` : "", cas.length ? `阵营候选：${cas.map((v) => valueName("alignment", v)).join("、")}` : roleDerived ? `${defaultOrigin}推定默认阵营（不确定）：${roleDefaults.map((v) => valueName("alignment", v)).join("、")}` : ""].filter(Boolean).join("；");
       button.title = [`${p.seat ?? "—"} 号 · ${p.name || p.id}`, roleText, alignmentText, candidateText, "点击管理假设与动作；条件、声明和查询来源见高级数据"].filter(Boolean).join("；");
       button.setAttribute("aria-label", button.title);
       if (dead.has(p.id)) {
@@ -184,7 +193,7 @@ window.Roundtable = (() => {
       if (activeAssumptions.length) tags.push(hasConfirmed ? "另有假设" : "临时假设");
        const observations = facts.filter((f) => f.type === "botc:ability_observation" && obj(f.data).actor_id === p.id && index(obj(f.data).time) === selectedTime);
        if (observations.length) tags.push(`动作 ${observations.length}`);
-       if (roleDerived) tags.push("按角色假设 · 默认阵营");
+        if (roleDerived && !als.length && !conflict) tags.push(`${defaultOrigin} · 默认阵营`);
        if (tags.length) button.append(el("span", tags.join(" · "), "player-tag"));
        button.addEventListener("click", () => { selectedPlayer = p.id; render(lastRequest, lastResponse); window.PlayerActions.open(lastRequest, p, selectedTime); });
       board.append(button);
@@ -206,8 +215,8 @@ window.Roundtable = (() => {
     const controlArea = el("div", undefined, "round-controls");
     controlArea.append(timeControls, rail);
     layout.append(viewport, controlArea); root.append(layout);
-    root.append(el("p", "圆桌时间严格区分：初始配置 → 第 1 夜 → 第 1 天 → 第 2 夜 → 第 2 天。圆桌卡片只显示所选时点的信息，不自动沿用初始身份；推进卡片左侧的三角按钮仅查看上一 / 下一历史阶段，不改变实际进度。下方记录始终汇总整局全部时点。窄屏请在圆桌内横向滑动。", "hint time-help"));
-    if (!players.length || ![...facts, ...assumptions, ...queries].some((f) => index(obj(f.proposition).time) === selectedTime)) root.append(el("p", "当前展示时点暂无条件或查询。可切换其他阶段查看，信息不会跨时间沿用。", "empty time-empty"));
+     root.append(el("p", "身份 / 阵营假设默认在所有时点共享显示；红唇女郎发生转化时，从该阶段起显示小恶魔，之前保持原假设。确认信息、声明与推理结果仍按原时点显示。假设延续仅用于展示，后台命题仍为单时点条件。左侧三角按钮仅查看历史，不改变实际进度。", "hint time-help"));
+    if (!players.length || (!assumptions.some((a) => a.enabled === true) && !players.some((p) => window.AssumptionTimeline.reportedCandidates(r, p.id, window.Roundtable.getSelectedTime()).length) && ![...facts, ...queries].some((f) => index(obj(f.proposition).time) === selectedTime))) root.append(el("p", "当前展示时点暂无条件或查询。可切换其他阶段查看。", "empty time-empty"));
     root.append(window.Reasoning.render(request, response, window.App.reasonState), records(players, assumptions, facts));
     // 重绘不能把窄屏用户刚点击的玩家滚出视野；初次载入居中展示圆心。
     viewport.scrollLeft = oldScroll ?? Math.max(0, (size - viewport.clientWidth) / 2);
