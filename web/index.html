@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>血染钟楼 · 推理助手</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="roles.js" defer></script>
+  <script src="skills.js" defer></script>
+  <script src="player-actions.js" defer></script>
+  <script src="night-deaths.js" defer></script>
+  <script src="day-voting.js" defer></script>
+  <script src="roundtable.js" defer></script>
+  <script src="setup.js" defer></script>
+  <script src="reasoning.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#setup-title">跳到初始设置</a>
+  <header><div class="container"><p class="eyebrow">BLOOD ON THE CLOCKTOWER</p><h1>血染钟楼 · 推理助手</h1><p>整理已知信息，查看查询结果与冲突依据。</p></div></header>
+  <main class="container">
+    <section id="setup" class="card setup-card" aria-labelledby="setup-title">
+      <div class="section-head"><span class="eyebrow">暗流涌动 · 初始设置</span><span id="setup-step">第 1/3 步 · 33%</span></div>
+      <div id="setup-progress" class="setup-progress" role="progressbar" aria-label="初始设置进度" aria-valuemin="0" aria-valuemax="3" aria-valuenow="1" aria-valuetext="第 1/3 步，33%"><span></span></div>
+      <h2 id="setup-title" tabindex="-1">这局有几位玩家？</h2>
+      <p id="setup-help" class="hint">暗流涌动支持 5–15 人，已预选 7 人，可直接更改。</p>
+      <form id="setup-form">
+        <fieldset id="setup-count"><legend class="sr-only">游戏人数</legend><div id="count-options" class="count-options"></div></fieldset>
+        <fieldset id="setup-seat" hidden><legend class="sr-only">本人座位</legend><div id="seat-options" class="count-options"></div></fieldset>
+        <fieldset id="setup-role" hidden><legend class="sr-only">本人身份（玩家声明）</legend><div id="role-options"></div></fieldset>
+        <p id="setup-seat-notice" class="round-status warning" role="status" aria-live="polite" hidden></p>
+        <p id="setup-selection" class="setup-selection" role="status" aria-live="polite"></p>
+        <div class="setup-actions"><button id="setup-back" type="button" hidden>上一步</button><button id="setup-next" class="primary" type="submit">下一步：选择本人座位</button><button id="setup-cancel" type="button" hidden>返回当前对局</button></div>
+      </form>
+    </section>
+    <div id="workspace" hidden>
+    <section class="card controls" aria-labelledby="input-title">
+      <div class="section-head"><h2 id="input-title">数据来源</h2><span id="source" class="badge">初始设置，尚未计算</span><button id="new-game" type="button">新建对局</button></div>
+      <div class="toolbar"><label for="example">选择示例</label><select id="example"><option value="success">成功 · 满足约束</option><option value="conflict">矛盾 · 不可满足</option><option value="error">HTTP 错误 · 模拟</option></select><button id="reload" type="button">重新加载示例</button></div>
+       <p id="notice" role="status" aria-live="polite"></p>
+    </section>
+    <section id="roundtable" class="card" aria-label="玩家圆桌"></section>
+    <details class="card advanced"><summary>高级数据 / 调试 <span class="hint">JSON 导入、协议明细与完整原始数据</span></summary>
+      <section aria-label="JSON 数据编辑">
+      <div class="editors">
+        <div><label for="request-json">请求 JSON（完整 game 快照）</label><textarea id="request-json" spellcheck="false" aria-describedby="edit-help"></textarea><label class="file-label" for="request-file">导入请求文件 <input id="request-file" type="file" accept=".json,application/json"></label></div>
+        <div><label for="response-json">响应 JSON</label><textarea id="response-json" spellcheck="false"></textarea><label class="file-label" for="response-file">导入响应文件 <input id="response-file" type="file" accept=".json,application/json"></label></div>
+      </div>
+      <p id="edit-help" class="hint">修改请求会立即更新可解析的当前请求并清除旧响应；不完整结构也可查看。应用 JSON 仅展示，不执行推理。文件导入后请点击应用。</p>
+       <div class="toolbar"><button id="apply" type="button">应用 JSON</button><span class="hint">仅展示，不执行推理</span></div>
+    </section>
+    <div id="dashboard"></div>
+    <section class="card" aria-labelledby="raw-title"><h2 id="raw-title">完整原始数据</h2><p class="hint">保留所有字段，包括暂未识别的扩展。以下是当前已应用的数据，不是未应用的编辑内容。</p><details><summary>原始 request JSON</summary><pre id="raw-request"></pre></details><details><summary>原始 response JSON</summary><pre id="raw-response"></pre></details></section>
+    </details>
+    </div>
+  </main>
+  <footer class="container">玩家声明不等于真实身份；一个满足模型不代表唯一解，也不代表概率。</footer>
+</body>
+</html>
