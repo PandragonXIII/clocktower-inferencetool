@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
 const list = (value) => Array.isArray(value) ? value : [];
 const text = (value) => value === undefined ? "—" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
-const labels = { sat: "可满足", unsat: "不可满足（存在矛盾）", unknown: "未知", possible: "可能", necessary: "必然", impossible: "不可能", inconsistent: "前提矛盾", confirmed: "已确认 · 硬约束", reported: "玩家声明 · 软信息" };
+const labels = { sat: "可满足", unsat: "不可满足（存在矛盾）", unknown: "未知", possible: "可能", necessary: "必然", impossible: "不可能", inconsistent: "前提矛盾", confirmed: "已确认来源", reported: "玩家声明 · 条件假设" };
 const labeled = (value) => typeof value === "string" && Object.hasOwn(labels, value) ? `${labels[value]} (${value})` : text(value);
 let currentRequest;
 let currentResponse;
@@ -72,7 +72,7 @@ function render(selectedTime) {
   table(players, ["座位", "玩家 id", "姓名"], list(game.players).map((v) => { const p = object(v); return [p.seat, p.id, p.name]; }), "玩家列表（不将声明当作身份）");
   dashboard.append(players);
   const facts = section("所有事实");
-  facts.append(node("p", "confirmed 是硬约束；reported 是玩家声明，不构成硬约束。enabled=false 不参与本次推理。", "hint"));
+  facts.append(node("p", "启用的 reported 声明会作为可撤销的条件假设参与推理，并不表示客观为真；confirmed 的作用范围由后台来源规则决定。enabled=false 不参与推理。", "hint"));
   table(facts, ["事实 id / 类型", "信息性质", "enabled", "命题（含完整 time）", "扩展 data", "extensions"], list(request.facts).map((v) => { const f = object(v); return [`${text(f.id)}\n${text(f.type)}`, labeled(f.status), f.enabled, f.proposition, f.data, f.extensions]; }), "事实与扩展信息");
   dashboard.append(facts);
   const assumptions = section("临时假设");

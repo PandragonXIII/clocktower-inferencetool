@@ -1,5 +1,9 @@
 # Web：圆桌推理助手
 
+## 当前推理接口兼容性
+
+已同步 Engine 的来源感知双范围推理：启用的 `reported` 声明作为可撤销条件输入参与 conditional 推理，不再被忽略；`confirmed` 也不一概等同 public，来源和 scope 的完整说明见协议与转换层文档。本节取代下文旧的“reported 不参与推理”描述。已有身份声明仍保留问号，不能当作客观事实。原有停用技能、死亡、投票及全局扩展仍不会自动启用，需要后续按后台支持范围逐项接入。
+
 ## 固定时点与记录纠错
 
 玩家窗口的假设、动作表单使用打开玩家卡片时的圆桌展示时点，仅显示一行时间说明，不再提供记录时点或阶段编号输入。要在其他阶段添加记录，先关闭窗口并用圆桌历史按钮切换时点。编辑记录使用原记录时点，不能悄悄移动到当前阶段。
@@ -46,7 +50,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 
 访问 `http://127.0.0.1:8000/`。不要直接以 `file://` 打开，否则浏览器可能阻止读取示例文件。
 
-`main.py web` 由 [`../backend/http_server.py`](../backend/http_server.py) 提供，同时服务静态 UI 与后台 API（含运行时校验）。而 `python -m http.server` 只提供静态文件、**不含 API**，此时点击“开始推理”会明确显示 HTTP 失败，不会生成假结果。若后台返回 **placeholder（占位）** 标记 `extensions["adapter:mode"] == "placeholder"`，前端明确提示未接入推理，不采用其一致性或查询结论。
+`main.py web` 由 [`../backend/http_server.py`](../backend/http_server.py) 提供，同时服务静态 UI 与后台 API（含运行时校验），并默认注入真实适配器 `connector.TroubleBrewingAdapter`（运行暗流涌动求解器）。而 `python -m http.server` 只提供静态文件、**不含 API**，此时点击“开始推理”会明确显示 HTTP 失败，不会生成假结果。若后台返回 **placeholder（占位）** 标记 `extensions["adapter:mode"] == "placeholder"`，前端明确提示未接入推理，不采用其一致性或查询结论。
 
 ## 查看与导入
 
@@ -251,7 +255,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 
 仅点击“开始推理”（或显式调用 `App.reason()`）时，以 `Content-Type: application/json` 向同源 `POST /api/v1/reason` 发送补充查询后的当前完整请求。后端按 [协议文档](protocol/README.md) 进行运行时校验，并返回 JSON；其实现见 [`../backend/README.md`](../backend/README.md)。
 
-若后台使用 placeholder 适配器，响应的 `extensions["adapter:mode"] == "placeholder"` 会使来源标记与推理区域明确说明**占位未运行引擎**，不会把响应当作真实推理结论。输入通过校验不代表引擎支持相应规则。
+若后台使用 placeholder 适配器（框架默认值，`main.py web` 不会使用），响应的 `extensions["adapter:mode"] == "placeholder"` 会使来源标记与推理区域明确说明**占位未运行引擎**，不会把响应当作真实推理结论。输入通过校验不代表引擎支持相应规则。
 
 网页对成功响应检查 API 版本、基本 reason response 结构和查询状态，然后严格比较当前请求的 request_id/game_id/revision；不匹配或发送过程中输入发生变化的响应不会应用。网络失败、20 秒超时、非 JSON、HTTP 错误均明确提示，不伪造结果。HTTP 错误体含 error 时展示并保留原始内容；逻辑 unsat 是正常推理响应，不能当作 HTTP 失败。部署时静态页面和 API 应使用同源地址（`main.py web` 已同源），或由反向代理转发 `/api/`。
 
@@ -288,7 +292,8 @@ git diff --check
 
 - 协议：[protocol/README.md](protocol/README.md)
 - 后台/API：[../backend/README.md](../backend/README.md)
-- 推理内核：[../engine/README.md](../engine/README.md)
+- 推理模型：[../botc_reasoner/README.md](../botc_reasoner/README.md)
+
 ## 全局假设
 
 “推理”卡片中，“开始推理”左侧的 **新增假设** 用于添加不属于单个玩家的条件。当前支持“某角色不在场”：选择角色后，作用时间取打开窗口时圆桌展示的时点。例如“初始配置时小恶魔不在场”，表示该时点没有任何玩家具有此角色，不代表整局所有时间均不存在。

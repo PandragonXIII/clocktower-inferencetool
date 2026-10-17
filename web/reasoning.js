@@ -68,11 +68,22 @@ window.Reasoning = (() => {
       });
       details.append(el("p", "以上是后台返回的冲突依据，不保证是最小冲突，也不是完整证明。", "hint"));
     } else {
-      details.append(el("h4", "恒为真结论"), el("p", "在当前已启用假设下恒为真；假设本身被验证为必然，不构成额外的独立证明。", "hint"));
+      const possible = arr(response.extensions?.["trouble_brewing:possible_roles"]);
+      details.append(el("h4", "可能身份"));
+      if (!possible.length) details.append(el("p", "后台未返回每位玩家的可能身份。"));
+      possible.forEach((row) => {
+        const player = arr(request.game?.players).find((p) => p.id === row.player_id);
+        const who = player ? `${player.seat} 号 · ${player.name || player.id}` : row.player_id;
+        const names = arr(row.role_ids).map((id) => window.ClocktowerRoles.names[id] || id);
+        const card = el("article", undefined, "evidence");
+        card.append(el("p", names.length ? `${who}：${names.join("、")}` : `${who}：无法为任何身份`));
+        details.append(card);
+      });
+      details.append(el("h4", "恒为真结论"), el("p", "下面只列出在当前已启用假设下必然成立的阵营或身份。", "hint"));
       const conclusions = arr(request.queries).filter((q) => arr(request.queries).filter((v) => v.id === q.id).length === 1 && arr(response.results).filter((v) => v.id === q.id).length === 1 && response.results.find((v) => v.id === q.id).status === "necessary");
-      if (!conclusions.length) details.append(el("p", "后台未返回必然结论"));
-      conclusions.forEach((q) => { const card = el("article", undefined, "evidence"); card.append(el("p", describe(q.proposition, request)), el("p", `query_id: ${q.id}`, "hint")); details.append(card); });
-      details.append(el("p", "只展示本次查询中 necessary 的结果；不代表已查询所有身份，也不把 possible 或一个满足模型当作恒真。", "hint"));
+       if (!conclusions.length) details.append(el("p", "后台未在本次查询中返回必然结论，不代表不存在其他必然结论。"));
+       details.append(el("p", "结论基于当前启用的条件输入，包括 reported 声明；它们不是无条件事实。", "hint"));
+      conclusions.forEach((q) => { const card = el("article", undefined, "evidence"); card.append(el("p", describe(q.proposition, request))); details.append(card); });
     }
     return root;
   }

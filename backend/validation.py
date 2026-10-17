@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from .errors import ApiError
+from .extension_validation import KNOWN_EXTENSIONS, validate_extension_data
 
 API_VERSION = "1.0"
 
@@ -35,11 +36,38 @@ _ROLE_PROPOSITION_FIELDS = {"kind", "player_id", "role_id", "time"}
 _ALIGNMENT_PROPOSITION_FIELDS = {"kind", "player_id", "alignment", "time"}
 _ASSUMPTION_FIELDS = {"id", "enabled", "proposition", "extensions"}
 _QUERY_FIELDS = {"id", "proposition"}
-_OPTIONS_FIELDS = {"timeout_ms"}
+_OPTIONS_FIELDS = {
+    "timeout_ms",
+    "total_timeout_ms",
+    "max_worlds",
+    "max_repairs",
+    "max_repair_checks",
+}
+
+# Bounded integer options: key -> (minimum, maximum), inclusive.
+_BOUNDED_OPTIONS = {
+    "total_timeout_ms": (1, 60000),
+    "max_worlds": (0, 100),
+    "max_repairs": (0, 10),
+    "max_repair_checks": (1, 1024),
+}
 
 _STATUS_VALUES = ("confirmed", "reported")
 _ALIGNMENT_VALUES = ("good", "evil")
 _PHASE_VALUES = ("setup", "day", "night")
+
+# Controlled metadata carried under the ``reasoner:`` extension namespace.
+_REASONER_SCOPE = "reasoner:scope"
+_REASONER_SOURCE = "reasoner:source"
+_REASONER_OWNER = "reasoner:owner_id"
+_SCOPE_VALUES = ("public", "conditional")
+_SOURCE_VALUES = (
+    "received",
+    "self_claim",
+    "assumption",
+    "public_announcement",
+    "observation",
+)
 
 
 def _escape(token: Any) -> str:
@@ -122,7 +150,14 @@ def _register_id(seen: dict[str, str], identifier: str, path: str) -> None:
     seen[identifier] = path
 
 
-def _validate_extensions(value: Any, path: str) -> None:
+def _validate_extensions(
+    value: Any,
+    path: str,
+    player_ids: set[str],
+    *,
+    is_assumption: bool,
+    status: str | None,
+) -> None:
     if not isinstance(value, dict):
         _fail("INVALID_REQUEST", "extensions must be a JSON object", path)
     for key in value:
@@ -138,6 +173,73 @@ def _validate_extensions(value: Any, path: str) -> None:
                 "INVALID_REQUEST",
                 "extension keys must be namespaced as 'namespace:name'",
                 _ptr(path, key),
+            )
+    _validate_reasoner_metadata(
+        value, path, player_ids, is_assumption=is_assumption, status=status
+    )
+
+
+def _validate_reasoner_metadata(
+    extensions: dict[str, Any],
+    path: str,
+    player_ids: set[str],
+    *,
+    is_assumption: bool,
+    status: str | None,
+) -> None:
+    """Validate the controlled ``reasoner:*`` metadata inside ``extensions``.
+
+    Unknown (non-``reasoner:``) extension fields stay allowed; only the known
+    ``reasoner:`` keys are checked. The metadata is validated even when the
+    record is disabled so that references stay meaningful.
+    """
+    scope = None
+    if _REASONER_SCOPE in extensions:
+        scope = extensions[_REASONER_SCOPE]
+        if scope not in _SCOPE_VALUES:
+            _fail(
+                "INVALID_REQUEST",
+                "reasoner:scope must be 'public' or 'conditional'",
+                _ptr(path, _REASONER_SCOPE),
+            )
+
+    if _REASONER_SOURCE in extensions:
+        source = extensions[_REASONER_SOURCE]
+        if not _is_nonempty_str(source) or source not in _SOURCE_VALUES:
+            _fail(
+                "INVALID_REQUEST",
+                "reasoner:source must be one of "
+                + ", ".join(repr(v) for v in _SOURCE_VALUES),
+                _ptr(path, _REASONER_SOURCE),
+            )
+
+    if _REASONER_OWNER in extensions:
+        owner = extensions[_REASONER_OWNER]
+        if not _is_nonempty_str(owner):
+            _fail(
+                "INVALID_REQUEST",
+                "reasoner:owner_id must be a non-empty string",
+                _ptr(path, _REASONER_OWNER),
+            )
+        if owner not in player_ids:
+            _fail(
+                "INVALID_REFERENCE",
+                f"unknown player_id: {owner!r}",
+                _ptr(path, _REASONER_OWNER),
+            )
+
+    if scope == "public":
+        if is_assumption:
+            _fail(
+                "INVALID_REQUEST",
+                "assumptions cannot be reasoner:scope public",
+                _ptr(path, _REASONER_SCOPE),
+            )
+        if status == "reported":
+            _fail(
+                "INVALID_REQUEST",
+                "reported facts cannot be reasoner:scope public",
+                _ptr(path, _REASONER_SCOPE),
             )
 
 
@@ -340,7 +442,13 @@ def _validate_fact(
     enabled = _require_bool(obj, "enabled", path)
 
     if "extensions" in obj:
-        _validate_extensions(obj["extensions"], _ptr(path, "extensions"))
+        _validate_extensions(
+            obj["extensions"],
+            _ptr(path, "extensions"),
+            player_ids,
+            is_assumption=False,
+            status=status,
+        )
 
     if fact_type in ("role", "alignment"):
         _reject_unknown_fields(obj, _FACT_COMMON_FIELDS | {"proposition"}, path)
@@ -372,7 +480,9 @@ def _validate_fact(
     if "data" not in obj:
         _fail("INVALID_REQUEST", "extension fact requires 'data'", _ptr(path, "data"))
 
-    if enabled:
+    if enabled and fact_type in KNOWN_EXTENSIONS:
+        validate_extension_data(fact_type, obj["data"], _ptr(path, "data"), player_ids, game_rank)
+    elif enabled:
         _fail(
             "UNKNOWN_TYPE",
             f"unsupported enabled extension fact type: {fact_type!r}",
@@ -398,7 +508,13 @@ def _validate_assumption(
     _require_bool(obj, "enabled", path)
 
     if "extensions" in obj:
-        _validate_extensions(obj["extensions"], _ptr(path, "extensions"))
+        _validate_extensions(
+            obj["extensions"],
+            _ptr(path, "extensions"),
+            player_ids,
+            is_assumption=True,
+            status=None,
+        )
 
     proposition = _require_field(obj, "proposition", path)
     _validate_proposition(
@@ -438,6 +554,17 @@ def _validate_options(value: Any, path: str) -> None:
                 "INVALID_REQUEST",
                 "timeout_ms must be a positive integer",
                 _ptr(path, "timeout_ms"),
+            )
+
+    for key, (minimum, maximum) in _BOUNDED_OPTIONS.items():
+        if key not in obj:
+            continue
+        option = obj[key]
+        if not _is_int(option) or option < minimum or option > maximum:
+            _fail(
+                "INVALID_REQUEST",
+                f"{key} must be an integer in {minimum}..{maximum}",
+                _ptr(path, key),
             )
 
 

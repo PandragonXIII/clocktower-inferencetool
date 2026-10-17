@@ -67,7 +67,8 @@ export interface AlignmentProposition {
 export type Proposition = RoleProposition | AlignmentProposition;
 
 // 事实的公共字段。
-// status：confirmed 是硬约束；reported 是玩家声明，属软信息，完全不构成硬约束。
+// status：confirmed 区分确认来源（仍可属于 conditional）；reported 是玩家声明，
+//   启用后作为可撤销的推理假设参与本次推理（玩家可在下一次请求中撤销），并不表示客观为真。
 // enabled：false 时该条事实不参与本次推理。
 interface FactBase {
   // 请求内稳定唯一 id，供冲突 input_ids 引用。
@@ -90,12 +91,71 @@ export interface AlignmentFact extends FactBase {
 }
 
 // 扩展事实：type 为 `命名空间:类型`，用 data 承载扩展载荷。
+// data 保持开放的 JsonValue：本文件不枚举所有扩展类型，由命名空间自行约定。
 export interface ExtensionFact extends FactBase {
   type: `${string}:${string}`;
   data: JsonValue;
 }
 
 export type Fact = RoleFact | AlignmentFact | ExtensionFact;
+
+// 以下为后台当前已识别的三类 BOTC 扩展 `data` 的形状（仅文档性注解，
+// 不改变 ExtensionFact.data 的开放类型）。运行时校验是否接受某条数据、
+// 以及是否真正生成约束，由后台校验与转换层决定；结构合法不代表已支持。
+//
+// 说明：
+// - `time` 用于这些扩展，取值 day/night + 正数 number（不含 setup）。
+// - `enabled: false` 的事实不解析 data，可保存任意草稿。
+// - 结构合法但当前模型不支持的组合会被拒绝为 HTTP 422。
+
+export interface AbilityObservationData {
+  time: { phase: "day" | "night"; number: number };
+  // 发动技能的玩家 id。
+  actor_id: string;
+  // 决定技能分支的角色 id（不是 ability_id）。
+  role_id: string;
+  targets: string[];
+  ability_id?: string;
+  note?: string;
+  result:
+    | { kind: "unobserved" }
+    | { kind: "no_outsiders" }
+    | { kind: "no_direct_result" }
+    | { kind: "role"; role_id: string }
+    | { kind: "number"; value: number }
+    | { kind: "text"; text: string }
+    | { kind: "choice"; value: string; role_id?: string };
+}
+
+export interface NightDeathsData {
+  // 必须为 night。
+  time: { phase: "night"; number: number };
+  // 公布的死亡玩家 id；result 为 "none" 时须为空数组。
+  player_ids: string[];
+  result: "deaths" | "none";
+}
+
+export interface DayVoteData {
+  // 必须为 day。
+  time: { phase: "day"; number: number };
+  // voting 表示投票未结算，当前模型不支持，应以 enabled:false 保存。
+  stage: "voting" | "settled";
+  // 被处决者；无人处决为 null。
+  execution: { player_id: string | null };
+  alive_count?: number;
+  threshold?: number;
+  highest_count?: number;
+  override?: boolean;
+  default_player_id?: string | null;
+  // 仅作记录用途，不代表完整投票推理。
+  nominations?: {
+    id: string;
+    nominator_id: string;
+    nominee_id: string;
+    voter_ids: string[];
+    count?: number;
+  }[];
+}
 
 // 临时假设：仅在本次请求内生效，不修改持久化的对局信息。
 export interface Assumption {
@@ -114,6 +174,58 @@ export interface Query {
 export interface Options {
   // 每次 solve 的超时（毫秒），不是整体请求预算。一次请求可能执行多次 solve。
   timeout_ms?: number;
+  // 分析总预算，默认 8000，1..60000；不含构建与排队。
+  total_timeout_ms?: number;
+  // 初始角色联合世界数量上限，默认 0（关闭），0..100。
+  max_worlds?: number;
+  // 每类最优撤回方案返回上限，默认 0（关闭），0..10。
+  max_repairs?: number;
+  // 每类修复搜索的求解次数上限，默认 128，1..1024。
+  max_repair_checks?: number;
+}
+
+// 以下类型说明 reasoner:* 扩展；运行时仍由后端校验。
+export type ReasonerScope = "public" | "conditional";
+export type ReasonerSource = "received" | "self_claim" | "assumption"
+  | "public_announcement" | "observation";
+
+export interface ReasonerInputExtensions {
+  // 仅 confirmed 事实可显式 public；假设始终 conditional。
+  "reasoner:scope"?: ReasonerScope;
+  "reasoner:source"?: ReasonerSource;
+  "reasoner:owner_id"?: string;
+}
+
+export interface ReasonerScopeResult {
+  consistency: Consistency;
+  input_ids: string[];
+  results: QueryResult[];
+}
+
+export interface ReasonerRoleRange {
+  player_id: string;
+  seat: number;
+  role_ids: string[];
+  impossible_role_ids: string[];
+  unknown_role_ids: string[];
+  complete: boolean;
+}
+
+export interface ReasonerRepairCandidate {
+  removed_input_ids: string[];
+  changed_owner_ids: string[];
+  cost: { owners: number; inputs: number };
+  optimality: "optimal";
+  verified: boolean;
+}
+
+export interface ReasonerWorlds {
+  worlds: { roles: Record<string, string> }[];
+  complete: boolean;
+  returned_count: number;
+  total: number | null;
+  truncated_reason: "max_worlds" | "solver_unknown" | "deadline" | null;
+  time: { phase: "setup" };
 }
 
 export interface ReasonRequest {
