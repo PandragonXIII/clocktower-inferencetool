@@ -67,7 +67,8 @@ export interface AlignmentProposition {
 export type Proposition = RoleProposition | AlignmentProposition;
 
 // 事实的公共字段。
-// status：confirmed 是硬约束；reported 是玩家声明，属软信息，完全不构成硬约束。
+// status：confirmed 是硬约束；reported 是玩家声明，来源是玩家自述而非客观确认，
+//   启用后作为可撤销的推理假设参与本次推理（玩家可在下一次请求中撤销），并不表示客观为真。
 // enabled：false 时该条事实不参与本次推理。
 interface FactBase {
   // 请求内稳定唯一 id，供冲突 input_ids 引用。

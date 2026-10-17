@@ -73,8 +73,21 @@
 [血染钟楼-暗流涌动 wiki](https://clocktower-wiki.gstonegames.com/index.php?title=%E6%9A%97%E6%B5%81%E6%B6%8C%E5%8A%A8)
 
 ## 推理引擎
-[Engine 使用说明](engine/README.md)
-[Engine 测试说明](tests/README.md)
+- [暗流涌动 Z3 模型](botc_reasoner/README.md)：`botc_reasoner/` 直接使用 Z3 建模暗流涌动规则，**不调用 `engine.ReasoningEngine`**。
+- [Engine 使用说明](engine/README.md)：通用 Z3 约束封装，不含 BOTC 规则。
+- [Engine 测试说明](tests/README.md)
+
+### 真实推理接口（connector.py）
+网页协议 JSON → `botc_reasoner` 模型 → 推理结果的桥在根目录 `connector.py`，它与 `main.py web` 的 placeholder 适配器不同，会真正运行求解器：
+
+```sh
+# 求解一份请求 JSON
+.venv/bin/python connector.py web/protocol/examples/request.json
+# 启动网页 + 真实推理 API（HTTP 会先做运行时校验）
+.venv/bin/python connector.py serve --port 8000
+```
+
+细节与当前限制见 [botc_reasoner 文档](botc_reasoner/README.md)。
 
 ## 网页与协议
 [Web 说明](web/README.md)
@@ -87,7 +100,7 @@
 python main.py web --host 127.0.0.1 --port 8000
 ```
 
-当前后台适配器为 **placeholder（占位）**：校验请求结构但不运行推理引擎，响应 `consistency: "unknown"` 并带 `extensions["adapter:mode"] == "placeholder"`。Python 原生 `python -m http.server` 仍只提供静态文件、不含 API。
+当前后台适配器为 **placeholder（占位）**：校验请求结构但不运行推理引擎，响应 `consistency: "unknown"` 并带 `extensions["adapter:mode"] == "placeholder"`。如需真实推理，请改用 `connector.py serve`（见上文[真实推理接口](#真实推理接口connectorpy)）。Python 原生 `python -m http.server` 仍只提供静态文件、不含 API。
 
 ## OpenCode 配置
 [配置说明](.opencode/README.md)

@@ -102,6 +102,23 @@ class ReasoningAdapter(Protocol):
 
 `http_server.create_server(host, port, adapter=...)` 可注入自定义适配器（须线程安全/无状态）。`reason()` 收到的 `request` 已经过 `validate_request` 校验；可在内部用 `prepare_request(request)` 把请求拆分为引擎就绪的分桶（confirmed/reported/disabled 事实、enabled/disabled 假设、查询等，均为深拷贝）。
 
+## 真实适配器入口
+
+后台框架本身只提供 placeholder。**真正运行暗流涌动求解器**的适配器在仓库根目录 `connector.py`：`TroubleBrewingAdapter` 实现本页定义的 `ReasoningAdapter` 契约，通过 `create_server(..., adapter=TroubleBrewingAdapter())` 注入，因此 `HTTP 校验 → 适配器` 这条链路与持有引擎时完全一致。
+
+```sh
+# 启动网页 + 真实推理 API（HTTP 先经 validate_request，再交给 TroubleBrewingAdapter）
+.venv/bin/python connector.py serve --port 8000
+```
+
+`connector.py` 也能直接求解一份请求 JSON（该 CLI 路径**不经过** `backend.validation`，与 HTTP 路径不同）：
+
+```sh
+.venv/bin/python connector.py web/protocol/examples/request.json
+```
+
+适配器的模型、CLI/HTTP 差异与当前限制见 [`../botc_reasoner/README.md`](../botc_reasoner/README.md)。
+
 ### 替换成真实适配器范例
 
 ```python
@@ -158,4 +175,5 @@ httpd.serve_forever()
 ## 相关文档
 
 - 协议契约：[../web/protocol/README.md](../web/protocol/README.md)
+- 真实适配器与暗流涌动模型：[../botc_reasoner/README.md](../botc_reasoner/README.md)
 - 推理内核：[../engine/README.md](../engine/README.md)

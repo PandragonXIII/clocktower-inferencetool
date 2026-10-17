@@ -1,10 +1,21 @@
 # 测试说明
 
-`tests/` 下有引擎测试与后端测试两个套件，均由顶层 `main.py test` 统一运行。
+`tests/` 下有引擎、后端、连接器三个套件，均由顶层 `main.py test` 统一运行。
 
 ## Engine 测试（`test_engine.py`）
 
 覆盖通用推理引擎的可满足性、身份查询结果（可能/必然/不可能/前提矛盾）、冲突标签、临时假设隔离、tracker 变量名冲突、自动标签、超时参数校验。
+
+## Connector 测试（`test_connector.py`）
+
+覆盖 `connector._fact_expr` 对 `enabled` 的开关语义：**先看 `enabled:false` 再分派 type**。用 5 人局声明变量与域公理验证（不装载 `add_game_rules`、不做全模型求解，保持快速）：
+
+- 三种扩展（`botc:night_deaths` / `botc:day_vote` / `botc:ability_observation`）禁用时**不调用** `_extension_expr`、不产生 proposition，且与「事实缺省」结果相同；非法 payload（未知玩家/角色）禁用时不抛异常。
+- 同样三种扩展启用时确实调用 `_extension_expr` 并产生带 label 的约束。
+- 经真实 `_prepare` 的 5 人局：禁用夜间死亡不进 labels、启用进；混合时只保留启用项。
+- **开关而非镜像**：启用夜间死亡与禁用「无人死亡」的 payload 直接组合为 `unsat`，混合请求仍 `sat`，证明禁用项是被真正跳过而非 payload 平凡。
+- 既有 core fact（`role`）的 `enabled` 处理保留。
+- `_horizon` 现状记录：禁用事实的时间仍会扩大声明的模型（本次不修）。
 
 ## Backend 测试（`test_backend.py`）
 

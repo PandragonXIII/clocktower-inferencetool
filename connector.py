@@ -191,12 +191,10 @@ def _fact_expr(
     world: TroubleBrewingVars,
     seats: dict[str, int],
 ) -> BoolRef | None:
-    fact_type = fact.get("type")
-    enabled = fact.get("enabled", True) is not False
-    if fact_type in _EXTENSIONS:
-        return _extension_expr(fact, world, seats)
-    if not enabled:
+    if fact.get("enabled", True) is False:
         return None
+    if fact.get("type") in _EXTENSIONS:
+        return _extension_expr(fact, world, seats)
     return _proposition_expr(
         fact.get("proposition"),
         world,

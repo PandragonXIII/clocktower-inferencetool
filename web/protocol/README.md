@@ -65,10 +65,10 @@
 ### facts：confirmed 与 reported
 
 - `status: "confirmed"`：**硬约束**。例如自己确认的真实身份、自己技能读到的结果。
-- `status: "reported"`：**玩家声明**，属于软信息，**完全不构成硬约束**（既不强制玩家身份，也不强制阵营）。玩家声称的身份不等于其真实身份。
+- `status: "reported"`：**玩家声明**，来源是玩家自述而非客观确认。启用（`enabled: true`）后作为**可撤销的推理假设**参与本次推理，而不是永久硬约束；玩家可以在下一次请求里撤销或改为 `enabled: false`。玩家声称的身份不等于其真实身份（角色声明在当前模型里对应「自认身份」，见下）。
 - `enabled: false`：该条事实不参与本次推理。
 
-**角色声明与真实身份必须区分**：声明用 `status: "reported"`，确认的身份用 `status: "confirmed"`。
+**角色声明与真实身份必须区分**：声明用 `status: "reported"`，确认的身份用 `status: "confirmed"`；二者的来源不同，`reported` 只表示玩家这样声称，并不表示客观为真。
 
 ### confirmed 技能观察 ≠ 真实身份
 
@@ -104,7 +104,7 @@
 
 | 状态 | 含义 |
 | --- | --- |
-| `possible` | 在 base（含规则、confirmed facts、assumptions）下，命题**可满足**且**非必然**（存在满足解使其为真，也存在满足解使其为假）。 |
+| `possible` | 在 base（含规则、confirmed facts、assumptions、启用的 `reported` 角色声明假设）下，命题**可满足**且**非必然**（存在满足解使其为真，也存在满足解使其为假）。 |
 | `necessary` | 命题在 base 的**所有**满足解中为真。 |
 | `impossible` | 命题在 base 的**所有**满足解中为假（其否定必然）。 |
 | `inconsistent` | **base 本身不可满足**（全局 `unsat`），因此命题无从谈起。 |
@@ -118,7 +118,7 @@
 
 响应回显 `request_id`、`game_id`、`revision`，客户端据此**丢弃旧响应**。`revision` 为整数且 `>= 0`，与请求一致。
 
-- `consistency`：全局一致性，取值 `sat` / `unsat` / `unknown`。全局判定包含**规则约束、confirmed facts 与 assumptions**（不包含 `reported`，因为其不硬约束）。
+- `consistency`：全局一致性，取值 `sat` / `unsat` / `unknown`。全局判定包含**规则约束、confirmed facts、assumptions，以及启用的 `reported` 角色声明假设**（`reported` 启用后即作为本次推理必须满足的假设计入）。
 - `reason`：可选。全局 `consistency = "unknown"` 时给出原因说明。
 - `conflicts`：`unsat` 时给出，含 `input_ids`（指向请求内 id）和 `rule_ids`（指向规则 id）。这是一组有用的冲突集，**不保证是最小冲突集**。
 - `model`：业务 JSON，**仅当 `consistency = "sat"`** 时给出，表示一个满足解。`model` **不代表唯一解、不含概率，也不是各查询各自的见证（witness）**；它只是满足 base 的某一个赋值，与某条查询为真/假无逐一对应关系。每个 assignment 带 `time`。
