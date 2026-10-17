@@ -3,7 +3,7 @@
 Commands:
     python main.py test   Run the unit test suite (default when no command given).
     python main.py demo   Run a small reasoning engine interface demo.
-    python main.py web    Serve the web UI and the placeholder reasoning API.
+    python main.py web    Serve the web UI and the real reasoning API.
 """
 
 import argparse
@@ -49,13 +49,14 @@ def _valid_port(value: str) -> int:
 
 def run_web(host: str, port: int) -> int:
     from backend.http_server import create_server
+    from connector import TroubleBrewingAdapter
 
     try:
-        httpd = create_server(host, port)
+        httpd = create_server(host, port, adapter=TroubleBrewingAdapter())
     except OSError as exc:
         print(f"error: cannot start web server on {host}:{port}: {exc}", file=sys.stderr)
         return 1
-    print(f"Serving UI and placeholder API at http://{host}:{port}/ (Ctrl+C to stop)")
+    print(f"Serving UI and reasoning API at http://{host}:{port}/ (Ctrl+C to stop)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -73,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("test", help="run the unit test suite (default)")
     subparsers.add_parser("demo", help="run the reasoning engine demo")
-    web = subparsers.add_parser("web", help="serve the web UI and placeholder reasoning API")
+    web = subparsers.add_parser("web", help="serve the web UI and real reasoning API")
     web.add_argument("--host", default=DEFAULT_HOST, help="bind host (default: 127.0.0.1)")
     web.add_argument(
         "--port",

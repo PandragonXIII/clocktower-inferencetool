@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from .errors import ApiError
+from .extension_validation import KNOWN_EXTENSIONS, validate_extension_data
 
 API_VERSION = "1.0"
 
@@ -372,7 +373,9 @@ def _validate_fact(
     if "data" not in obj:
         _fail("INVALID_REQUEST", "extension fact requires 'data'", _ptr(path, "data"))
 
-    if enabled:
+    if enabled and fact_type in KNOWN_EXTENSIONS:
+        validate_extension_data(fact_type, obj["data"], _ptr(path, "data"), player_ids, game_rank)
+    elif enabled:
         _fail(
             "UNKNOWN_TYPE",
             f"unsupported enabled extension fact type: {fact_type!r}",

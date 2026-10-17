@@ -91,12 +91,71 @@ export interface AlignmentFact extends FactBase {
 }
 
 // 扩展事实：type 为 `命名空间:类型`，用 data 承载扩展载荷。
+// data 保持开放的 JsonValue：本文件不枚举所有扩展类型，由命名空间自行约定。
 export interface ExtensionFact extends FactBase {
   type: `${string}:${string}`;
   data: JsonValue;
 }
 
 export type Fact = RoleFact | AlignmentFact | ExtensionFact;
+
+// 以下为后台当前已识别的三类 BOTC 扩展 `data` 的形状（仅文档性注解，
+// 不改变 ExtensionFact.data 的开放类型）。运行时校验是否接受某条数据、
+// 以及是否真正生成约束，由后台校验与转换层决定；结构合法不代表已支持。
+//
+// 说明：
+// - `time` 用于这些扩展，取值 day/night + 正数 number（不含 setup）。
+// - `enabled: false` 的事实不解析 data，可保存任意草稿。
+// - 结构合法但当前模型不支持的组合会被拒绝为 HTTP 422。
+
+export interface AbilityObservationData {
+  time: { phase: "day" | "night"; number: number };
+  // 发动技能的玩家 id。
+  actor_id: string;
+  // 决定技能分支的角色 id（不是 ability_id）。
+  role_id: string;
+  targets: string[];
+  ability_id?: string;
+  note?: string;
+  result:
+    | { kind: "unobserved" }
+    | { kind: "no_outsiders" }
+    | { kind: "no_direct_result" }
+    | { kind: "role"; role_id: string }
+    | { kind: "number"; value: number }
+    | { kind: "text"; text: string }
+    | { kind: "choice"; value: string; role_id?: string };
+}
+
+export interface NightDeathsData {
+  // 必须为 night。
+  time: { phase: "night"; number: number };
+  // 公布的死亡玩家 id；result 为 "none" 时须为空数组。
+  player_ids: string[];
+  result: "deaths" | "none";
+}
+
+export interface DayVoteData {
+  // 必须为 day。
+  time: { phase: "day"; number: number };
+  // voting 表示投票未结算，当前模型不支持，应以 enabled:false 保存。
+  stage: "voting" | "settled";
+  // 被处决者；无人处决为 null。
+  execution: { player_id: string | null };
+  alive_count?: number;
+  threshold?: number;
+  highest_count?: number;
+  override?: boolean;
+  default_player_id?: string | null;
+  // 仅作记录用途，不代表完整投票推理。
+  nominations?: {
+    id: string;
+    nominator_id: string;
+    nominee_id: string;
+    voter_ids: string[];
+    count?: number;
+  }[];
+}
 
 // 临时假设：仅在本次请求内生效，不修改持久化的对局信息。
 export interface Assumption {

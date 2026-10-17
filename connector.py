@@ -45,7 +45,7 @@ class TroubleBrewingAdapter:
             "api_version": "1.0",
             "supported_fact_types": ["role", "alignment", *_EXTENSIONS],
             "query_types": ["role", "alignment"],
-            "scripts": ["trouble_brewing"],
+            "scripts": [{"id": "trouble_brewing", "name": "暗流涌动"}],
             "extensions": {"adapter:mode": "trouble_brewing"},
         }
 

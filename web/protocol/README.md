@@ -2,7 +2,7 @@
 
 本目录定义血染钟楼网页端与后台推理服务之间的**通用 JSON 接口契约**。
 
-**本目录只定义协议，不含服务实现**；当前 HTTP 实现见 [`../../backend/README.md`](../../backend/README.md)。后台目前的适配器是 **placeholder（占位）**：它只回显请求标识、按 id 回显查询并把全局一致性与所有查询都判为 `unknown`，**并未做规则转换、也未运行推理引擎**。能力通过 `extensions["adapter:mode"] == "placeholder"` 显式暴露。
+**本目录只定义协议，不含服务实现**；当前 HTTP 实现见 [`../../backend/README.md`](../../backend/README.md)。顶层入口 `main.py web` 默认注入真实适配器 `connector.TroubleBrewingAdapter`（运行暗流涌动求解器）；后台框架本身自带的默认适配器仍是 **placeholder（占位）**：它只回显请求标识、按 id 回显查询并把全局一致性与所有查询都判为 `unknown`，**并未做规则转换、也未运行推理引擎**。placeholder 通过 `extensions["adapter:mode"] == "placeholder"` 显式暴露。
 
 因此：**输入结构支持不等于真实推理支持**。运行时校验会接受结构完整、语义合法的请求，但这不代表后台已经理解了其中的角色或技能。
 
@@ -37,9 +37,9 @@
 
 ### GET /api/v1/capabilities
 
-简要约定，返回 `supported_fact_types`、`query_types`、`scripts`，供前端了解后台当前支持的能力。
+简要约定，返回 `supported_fact_types`、`query_types`、`scripts`，供前端了解后台当前支持的能力。`scripts` 为**对象数组** `{ id: string; name: string }[]`（例如 `[{ "id": "trouble_brewing", "name": "暗流涌动" }]`），不是字符串数组。
 
-`extensions` 可选，其中 `adapter:mode` 与 `adapter:accepted_fact_types` 由后台占位适配器提供：`adapter:mode == "placeholder"` 表示尚未接入真实推理引擎；`adapter:accepted_fact_types` 列出运行时校验目前接受的**结构类型**（注意这只是输入结构支持，不是真实推理支持）。
+`extensions` 可选，其中 `adapter:mode` 与 `adapter:accepted_fact_types` 由后台占位适配器提供：`adapter:mode == "placeholder"` 表示尚未接入真实推理引擎；`adapter:accepted_fact_types` 列出运行时校验目前接受的**结构类型**（注意这只是输入结构支持，不是真实推理支持）。注入真实适配器后 `adapter:mode` 为 `"trouble_brewing"`。
 
 ## 关键语义
 
@@ -92,6 +92,23 @@
 
 - `api_version` 不是 `"1.0"`：返回 HTTP 错误（不受支持的协议版本）。
 - 未知且活跃（`enabled = true`）的事实/命题类型：返回 HTTP 错误，**不得静默忽略**；`enabled = false` 的未知类型可忽略。
+
+#### 已知扩展事实的 `data` 形状
+
+后台当前已识别三类 BOTC 扩展（见 `types.ts` 中 `AbilityObservationData` / `NightDeathsData` / `DayVoteData`，它们只是文档性注解，不改变 `ExtensionFact.data: JsonValue` 的开放结构）：
+
+| `type` | `data` 摘要 |
+| --- | --- |
+| `botc:ability_observation` | `time`（day/night + 正数）、`actor_id`、`role_id`、`targets`，以及 `result.kind`（`unobserved`/`no_outsiders`/`no_direct_result`/`role`/`number`/`text`/`choice`）与对应字段。 |
+| `botc:night_deaths` | `time`（night）、`player_ids`、`result`（`deaths`/`none`）。 |
+| `botc:day_vote` | `time`（day）、`stage`（`voting`/`settled`）、`execution.player_id`（可为 `null`），可选 `nominations` 等记录字段。 |
+
+约定：
+
+- **`enabled: false` 不解析 `data`**：可保存任意草稿。
+- **结构非法或引用不存在**（未知玩家/角色、时间晚于 `game.time`、字段类型错误）返回 `400`。
+- **结构合法但当前模型不支持**返回 `422`，例如未结算投票（`stage: "voting"`）、首夜死亡、转换层未支持的角色观察。`422` 不是格式错误，不代表已支持。
+- 未结算的投票、前端未完成记录等应以 `enabled: false` 保存。
 
 ### assumptions
 
@@ -167,7 +184,7 @@ HTTP 错误响应体：
 - 请求体：要求 `Content-Type: application/json` 与单个十进制 `Content-Length`；拒绝 `Transfer-Encoding`；超过 1 MiB 返回 `413`；读取超时 `408`。
 - 解析：拒绝重复 JSON 键与 `NaN`/`Infinity`（`INVALID_JSON`）。
 - 错误与逻辑结论分离：校验/服务失败返回 `4xx`/`5xx` 且带 `error` 对象；逻辑 `unsat` 是 `200` 正常响应。`ApiError`（协议错误）与 HTTP 传输错误是两回事。
-- 未知 API 路径之外的路径交给静态文件服务（`web/`），因此直接用 `python -m http.server` 只提供静态文件、**不含 API**；`python main.py web` 才同时提供 UI 与 API。
+- 未知 API 路径之外的路径交给静态文件服务（`web/`），因此直接用 `python -m http.server` 只提供静态文件、**不含 API**；`python main.py web` 才同时提供 UI 与 API（默认注入真实适配器）。
 
 ### 拒绝的情况
 
@@ -191,7 +208,7 @@ HTTP 错误响应体：
 ## 与其他目录的关系
 
 - 推理内核接口见 [`../../engine/README.md`](../../engine/README.md)。
-- 当前 HTTP 实现见 [`../../backend/README.md`](../../backend/README.md)：现在是 placeholder 适配器，未运行引擎，因此对 `examples/request.json` 实际返回 `consistency: "unknown"`，而非示例中的 `sat`/`necessary`。示例描述的是**目标契约**，不是当前后台能力。
+- 当前 HTTP 实现见 [`../../backend/README.md`](../../backend/README.md)：顶层入口 `main.py web` 默认注入真实适配器 `connector.TroubleBrewingAdapter`，对 `examples/request.json` 返回示例描述的 `sat`/`necessary`；框架默认 placeholder 适配器（直接调用 `create_server()` 时）则返回 `consistency: "unknown"`。
 - 本协议描述的是网页/后台契约，后台实现需自行完成运行时校验（TypeScript 类型无法在运行时校验）。
 
 ## 示例

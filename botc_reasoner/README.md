@@ -20,7 +20,7 @@ web/ 前端 ──POST /api/v1/reason──► backend/http_server.py ──校�
 | `botc_reasoner/`（本目录） | 暗流涌动变量与规则，直接 Z3 | 否 |
 | 根 `connector.py` | 网页协议 JSON ↔ 模型 ↔ 响应；也能独立起服务 | 否（直接用 botc_reasoner） |
 | `engine/` | 通用 Z3 约束/查询封装，不含 BOTC 规则 | — |
-| `backend/` | HTTP 路由与运行时校验，适配器可注入 | placeholder 时不用任何求解器 |
+| `backend/` | HTTP 路由与运行时校验，适配器可注入；框架默认 placeholder 时不使用任何求解器，`main.py web` 注入本目录的真实适配器 |
 
 ## 文件分工
 
@@ -102,7 +102,7 @@ solver.push(); solver.add(Not(q));   negative = solver.check(); solver.pop()
 
 ## 文本推理工具
 
-`test_reasoning.py`（仓库根）是**交互式命令行工具**，不是单元测试，也不被 `python main.py test` 收集（后者只发现 `tests/`，当前 39 个测试）。先输入 `c/f/h/d`（如 `5/1/1/1`），再逐行输入中文命题（`身份`、`自认`、`夜间死亡`、`处决`、`发动 …` 等），空行结束。运行：
+`test_reasoning.py`（仓库根）是**交互式命令行工具**，不是单元测试，也不被 `python main.py test` 收集（后者只发现 `tests/` 下的测试套件）。先输入 `c/f/h/d`（如 `5/1/1/1`），再逐行输入中文命题（`身份`、`自认`、`夜间死亡`、`处决`、`发动 …` 等），空行结束。运行：
 
 ```sh
 .venv/bin/python test_reasoning.py
@@ -124,13 +124,16 @@ solver.push(); solver.add(Not(q));   negative = solver.check(); solver.pop()
 **2. 启动网页 + 真实推理 API（HTTP 会先做运行时校验）：**
 
 ```sh
+# 推荐：顶层入口，默认注入真实适配器
+.venv/bin/python main.py web --port 8000
+# 兼容入口，行为相同
 .venv/bin/python connector.py serve --port 8000
 # 或 .venv/bin/python connector.py --serve --port 8000
 ```
 
 此时 `POST /api/v1/reason` 先经 `backend.validation.validate_request`，再交给 `TroubleBrewingAdapter`。两条路径的差异：CLI 无校验、HTTP 有校验；求解逻辑相同。
 
-> `main.py web` 启动的仍是 **placeholder** 适配器（未运行本模型）。要跑真实推理，请用 `connector.py serve`。
+> 只有后台框架自带的默认适配器（直接调用 `create_server()` 且不传 adapter）才是 **placeholder**，未运行本模型。`main.py web` 与 `connector.py serve` 都使用真实适配器。
 
 ## 支持范围与输出语义
 
@@ -152,25 +155,23 @@ solver.push(); solver.add(Not(q));   negative = solver.check(); solver.pop()
 
 ## 当前限制 / 待修正（先读）
 
-以下问题来自代码审阅及针对性验证；其中 HTTP 拒绝活跃扩展已实际复现，其他项可由对应分支确认，尚无完整集成测试覆盖。它们不是设计意图。行号易变，以函数名为准。
+以下问题来自代码审阅及针对性验证，尚无完整对局的集成测试覆盖。它们不是设计意图。行号易变，以函数名为准。
 
-1. **`capabilities.scripts` 类型不符**（`connector.TroubleBrewingAdapter.capabilities` 返回 `["trouble_brewing"]` 字符串数组，协议 `types.ts` 要求 `{ id, name }[]`）。
+1. **CLI 的能力输入可能静默丢弃或缺少校验**（`connector._ability`）：如占卜师目标不足两人，分支未匹配会返回 `None`；厨师分支本身不检查是否首夜。HTTP 路径通过 `backend.extension_validation` 拦截此类格式错误和不支持的观察，但 CLI 直接调用连接器不经过这些检查。`kind == "unobserved"` 是合法的「无观察结果」，两条路径都刻意不生成约束。
 
-2. **不匹配的能力输入可能静默丢弃或缺少校验**（`connector._ability`）：如占卜师目标不足两人，分支未匹配会返回 `None`，没有告知该活跃观察未被采用；`kind == "unobserved"` 也不生成约束。另一些分支缺少时间检查，例如厨师只检查结果种类，不检查是否首夜。这些输入尚未形成严格的扩展协议校验。
+2. **未知引用可能 `KeyError`**：`connector._night_deaths` / `_execution` 用 `seats[player_id]` 直接索引，未知玩家抛 `KeyError`；`_ability` 只捕获 `ValueError`，而 `role_from_name` 对未知 `role_id` 抛 `KeyError`，同样逃逸。`_reason` 只捕获 `ValueError`，最终在 HTTP 层变成 **500**。HTTP 路径会先经 `backend.extension_validation` 拦截未知玩家/角色，但 **CLI 路径不校验**，仍可直接触发。
 
-3. **未知引用可能 `KeyError`**：`connector._night_deaths` / `_execution` 用 `seats[player_id]` 直接索引，未知玩家抛 `KeyError`；`_ability` 只捕获 `ValueError`，而 `role_from_name` 对未知 `role_id` 抛 `KeyError`，同样逃逸。`_reason` 只捕获 `ValueError`，最终在 HTTP 层变成 **500**。
+3. **候选角色枚举提前停止且无完整标志**（`connector._possible_roles` 的 `while solver.check() == sat`）：一旦某次求解返回 `unknown`，循环直接结束，**不标记候选集不完整**，会得到看似完整的错误候选列表。
 
-4. **候选角色枚举提前停止且无完整标志**（`connector._possible_roles` 的 `while solver.check() == sat`）：一旦某次求解返回 `unknown`，循环直接结束，**不标记候选集不完整**，会得到看似完整的错误候选列表。
+4. **冲突异常未捕获可致 HTTP 500**（`connector._reason` 的 `unsat` 分支在 `try` 之外调用 `minimal_unsatisfiable_subset`）：该函数背景不可满足时抛 `ValueError`、超时抛 `TimeoutError`，均未捕获，会在 HTTP 层变成 **500**。另注意它返回的是**极小（不可再删）子集，不是最少条数子集**（`conflict.py` 文档已说明）。
 
-5. **冲突异常未捕获可致 HTTP 500**（`connector._reason` 的 `unsat` 分支在 `try` 之外调用 `minimal_unsatisfiable_subset`）：该函数背景不可满足时抛 `ValueError`、超时抛 `TimeoutError`，均未捕获，会在 HTTP 层变成 **500**。另注意它返回的是**极小（不可再删）子集，不是最少条数子集**（`conflict.py` 文档已说明）。
-
-6. **HTTP 校验与适配器的扩展支持未接通**（`backend.validation._validate_fact`：扩展事实 `enabled:true` 直接 `UNKNOWN_TYPE` 400）。因此即使 `capabilities` 宣称支持 `botc:*` 扩展，**经 HTTP 无法以 enabled 提交**。这是待修正的接入缺口。`enabled:false` 仅供记录，不会参与求解，不能作为替代启用路径。
+HTTP 的三类已知扩展由 `backend.extension_validation` 校验，`enabled:true` 的受支持数据可正常提交：结构非法或引用错误返回 `400`，当前模型不支持的组合返回 `422`。`enabled:false` 仅供记录、不解析载荷、不参与求解。`capabilities.scripts` 使用协议规定的 `{ id, name }` 对象数组；声明某类输入受支持不代表该类所有角色和结果组合都已建模。
 
 性能相关（非缺陷，但需知晓）：每条 query 两次求解；候选枚举对每名玩家反复求解；`TroubleBrewingAdapter` 用实例锁 `self._lock` 串行化所有请求；`options.timeout_ms` 是**每次 solve** 的超时，不是整体请求预算。
 
 ## 扩展事实 data 格式（按 connector 实际实现）
 
-三类扩展由 `connector._extension_expr` 分发，只读取下列字段；其余字段被忽略。**`enabled:false` 的事实（核心与扩展一律）不参与本次推理**；另注意「当前限制」中关于 HTTP 拒绝活跃扩展的一条。
+三类扩展由 `connector._extension_expr` 分发，只读取下列字段；其余字段被忽略。**`enabled:false` 的事实（核心与扩展一律）不参与本次推理**，其 `data` 不会被解析。经 HTTP 提交的 `enabled:true` 已知扩展会先由 `backend.extension_validation` 做结构与部分语义校验（见 [backend/README.md](../backend/README.md#扩展事实校验extension_validationpy)）：结构非法/引用错误为 `400`，当前模型不支持的组合为 `422`；CLI 路径不校验。
 
 | `type` | 说明 | connector 读取的 `data` 字段 |
 | --- | --- | --- |
@@ -194,7 +195,9 @@ solver.push(); solver.add(Not(q));   negative = solver.check(); solver.pop()
 }
 ```
 
-`botc:ability_observation` 的分支由 `role_id` 决定（不是 `ability_id`），例如 `role_id:"chef"` 配 `result:{kind:"number",value:N}`；`role_id:"fortune_teller"` 配 `targets` 与 `result:{value:"yes"|"no"}`。`botc:day_vote` 只识别 `stage:"settled"`，投票阶段的 `voting` 会被忽略（返回 `None`）。
+`botc:ability_observation` 的分支由 `role_id` 决定（不是 `ability_id`），例如 `role_id:"chef"` 配 `result:{kind:"number",value:N}`；`role_id:"fortune_teller"` 配 `targets` 与 `result:{value:"yes"|"no"}`。转换层 `connector._ability` 只对已建模的角色/结果组合生成约束，`result.kind == "unobserved"` 明确表示无观察结果，**刻意不生成约束**；它不会为此报错。
+
+`botc:day_vote` 在转换层（`connector._execution`）只识别 `stage:"settled"`，`voting` 会返回 `None`（不生成约束）。经 HTTP 提交时，活跃（`enabled:true`）的未结算投票会被校验层以 `422 UNSUPPORTED_OBSERVATION` 拒绝，应改为 `enabled:false` 保存。`nominations`、`alive_count`、`threshold` 等字段仅作记录，当前不参与规则推理；处决判定只读取 `execution.player_id`。
 
 ## 相关文档
 

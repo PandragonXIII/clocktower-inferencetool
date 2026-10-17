@@ -78,7 +78,7 @@
 - [Engine 测试说明](tests/README.md)
 
 ### 真实推理接口（connector.py）
-网页协议 JSON → `botc_reasoner` 模型 → 推理结果的桥在根目录 `connector.py`，它与 `main.py web` 的 placeholder 适配器不同，会真正运行求解器：
+网页协议 JSON → `botc_reasoner` 模型 → 推理结果的桥在根目录 `connector.py`。它既被 `main.py web` 注入为默认适配器（真正运行求解器），也可独立使用：
 
 ```sh
 # 求解一份请求 JSON
@@ -87,7 +87,7 @@
 .venv/bin/python connector.py serve --port 8000
 ```
 
-细节与当前限制见 [botc_reasoner 文档](botc_reasoner/README.md)。
+`main.py web` 与 `connector.py serve` 都使用真实适配器；前者是推荐入口。CLI 直接求解请求 JSON 的路径**不经过** `backend.validation`。细节与当前限制见 [botc_reasoner 文档](botc_reasoner/README.md)。
 
 ## 网页与协议
 [Web 说明](web/README.md)
@@ -100,7 +100,7 @@
 python main.py web --host 127.0.0.1 --port 8000
 ```
 
-当前后台适配器为 **placeholder（占位）**：校验请求结构但不运行推理引擎，响应 `consistency: "unknown"` 并带 `extensions["adapter:mode"] == "placeholder"`。如需真实推理，请改用 `connector.py serve`（见上文[真实推理接口](#真实推理接口connectorpy)）。Python 原生 `python -m http.server` 仍只提供静态文件、不含 API。
+`main.py web` 默认注入真实适配器 `connector.TroubleBrewingAdapter`，会运行暗流涌动求解器并返回真实推理结果。`python -m http.server` 只提供静态文件、不含 API。`connector.py serve` 是等价的兼容入口。CLI 求解请求 JSON 的路径不经过运行时校验（详见 [botc_reasoner 文档](botc_reasoner/README.md)）。
 
 ## OpenCode 配置
 [配置说明](.opencode/README.md)
