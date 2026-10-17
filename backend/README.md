@@ -155,48 +155,20 @@ class ReasoningAdapter(Protocol):
 
 ```python
 # backend/my_adapter.py
-from backend.adapter import API_VERSION, prepare_request
-from engine import ReasoningEngine
-
-class EngineAdapter:
-    def capabilities(self):
-        return {
-            "api_version": API_VERSION,
-            "supported_fact_types": ["role", "alignment"],
-            "query_types": ["role", "alignment"],
-            "scripts": [{"id": "trouble_brewing", "name": "暗流涌动"}],
-            "extensions": {"adapter:mode": "engine"},
-        }
-
-    def reason(self, request):
-        prepared = prepare_request(request)
-        engine = ReasoningEngine()
-        # TODO: 把 prepared.confirmed_facts / enabled_assumptions 转成约束
-        consistency = "unknown"  # 由 engine.check() 得出
-        return {
-            "api_version": API_VERSION,
-            "request_id": prepared.request_id,
-            "game_id": prepared.game.get("id"),
-            "revision": prepared.game.get("revision"),
-            "consistency": consistency,
-            "results": [
-                {"id": q.get("id"), "status": "unknown"} for q in prepared.queries
-            ],
-            "extensions": {"adapter:mode": "engine"},
-        }
-```
-
-注入：
-
-```python
+from connector import TroubleBrewingAdapter
 from backend.http_server import create_server
-from backend.my_adapter import EngineAdapter
 
-httpd = create_server("127.0.0.1", 8000, adapter=EngineAdapter())
+httpd = create_server("127.0.0.1", 8000, adapter=TroubleBrewingAdapter())
 httpd.serve_forever()
 ```
 
+`connector.TroubleBrewingAdapter` 实现本页定义的 `ReasoningAdapter` 契约，通过 `create_server(..., adapter=...)` 注入。推荐直接用顶层入口 `main.py web`，它已完成同样的注入。
+
 ## 测试
+
+双层分析使用的 `reasoner:scope/source/owner_id` 元数据由 `validation.py` 校验；只有 confirmed 事实允许显式 public，假设只能 conditional，owner 必须引用玩家。禁用事实不解析技能载荷，但仍校验元数据。
+
+分析选项还包括 `total_timeout_ms`（1..60000）、`max_worlds`（0..100）、`max_repairs`（0..10）、`max_repair_checks`（1..1024）。默认值、预算边界与结果扩展见[协议说明](../web/protocol/README.md#双层分析与高级结果)。编译和分析由 `connector.py` 与 `botc_reasoner/pipeline.py` 执行。
 
 后端测试见 [`../tests/test_backend.py`](../tests/test_backend.py)，覆盖真实临时 HTTP 请求、校验拒绝、路由/传输错误，以及注入 fake adapter 模拟 `sat`/`unsat`/异常。运行：
 
@@ -208,4 +180,3 @@ httpd.serve_forever()
 
 - 协议契约：[../web/protocol/README.md](../web/protocol/README.md)
 - 真实适配器与暗流涌动模型：[../botc_reasoner/README.md](../botc_reasoner/README.md)
-- 推理内核：[../engine/README.md](../engine/README.md)

@@ -41,6 +41,48 @@
 
 `extensions` 可选，其中 `adapter:mode` 与 `adapter:accepted_fact_types` 由后台占位适配器提供：`adapter:mode == "placeholder"` 表示尚未接入真实推理引擎；`adapter:accepted_fact_types` 列出运行时校验目前接受的**结构类型**（注意这只是输入结构支持，不是真实推理支持）。注入真实适配器后 `adapter:mode` 为 `"trouble_brewing"`。
 
+## 双层分析与高级结果
+
+真实适配器分别求解 **public（规则 + 公共输入）** 和 **conditional（规则 + 公共输入 + 当前采信的其他输入）**。顶层结果对应 conditional。条件背景矛盾不影响公共背景下已证明的结论；背景矛盾时查询返回 `inconsistent`，不据此推出任意身份。
+
+默认只有启用且 `confirmed` 的 `botc:night_deaths` 和已结算 `botc:day_vote` 属于 public，其余为 conditional。事实可用 `extensions["reasoner:scope"]` 显式设为 `public` 或 `conditional`，但只有 `confirmed` 允许 public；假设只能 conditional。`confirmed` role 仍指真实身份，`reported` role 指自认身份。
+
+事实／假设可携带 `reasoner:source`：`received`、`self_claim`、`assumption`、`public_announcement`、`observation`；它只记录来源，不改变可信等级。私密收到的信息与用户假设在条件层同样可撤回，收到数字不代表数字正确，信息正确性仍由健康、注册等规则决定。`reasoner:owner_id` 引用玩家，用于归属和修复分组；默认身份命题归其玩家，技能观察归发动者，不归观察目标。禁用记录不解析技能载荷，但元数据仍校验。
+
+### 分析选项
+
+| 选项 | 默认 | 合法范围与含义 |
+| --- | --- | --- |
+| `timeout_ms` | 1000 | 正整数，每次求解超时毫秒 |
+| `total_timeout_ms` | 8000 | 1..60000，所有分析共享的毫秒预算 |
+| `max_worlds` | 0 | 0..100，0 关闭世界枚举 |
+| `max_repairs` | 0 | 0..10，0 关闭修复建议 |
+| `max_repair_checks` | 128 | 1..1024，每类修复的求解次数上限 |
+
+例如 `"options":{"total_timeout_ms":8000,"max_worlds":10,"max_repairs":3}`。世界枚举用于 sat 背景，修复用于 unsat 背景。总预算从分析阶段开始，不含变量／规则构建或等待适配器锁的时间，也不是整个 HTTP 请求的硬截止时间。预算有限时各项分析可能未完成。
+
+### 响应扩展
+
+以下均放在响应 `extensions`，现有网页尚未专门渲染这些高级结果，可直接查看 API JSON。
+
+| 字段 | 当前内容 |
+| --- | --- |
+| `reasoner:scopes` | 两层各自的 `consistency/results/input_ids` |
+| `reasoner:inputs` | 输入的 `id/scope/source/owner_id/identity_claim/description`，不含 Z3 表达式 |
+| `reasoner:rule_catalog` | 实际规则组的 `id/title/source`，含变量域 `tb:domain` |
+| `reasoner:conclusions` | 已证 necessary 命题、scope、输入及规则依据；`basis_type:full_context` 是整个背景，不是最小证明 |
+| `reasoner:diagnosis` | 按 scope 返回冲突核或 unknown，附说明、输入描述、规则组名称 |
+| `reasoner:role_ranges` | conditional 初始身份范围：`scope/time/rows/complete`；每行含玩家、seat、可行 `role_ids`、已排除 `impossible_role_ids`、未判定 `unknown_role_ids`、`complete` |
+| `reasoner:repairs` | `identity`（仅身份）和 `general`（所有条件输入）两类撤回方案 |
+| `reasoner:worlds` | 初始角色联合世界：`worlds:[{roles:{玩家id:角色id}}]`、`returned_count/complete/total/truncated_reason/time` |
+| `reasoner:timeout` | `total_ms/per_solve_ms/hit`，反映总预算是否耗尽 |
+
+冲突按规则组、域公理和单条输入追踪。`minimality:inclusion` 仅表示核内任一组都不可再删除，不表示最少条数；`unverified` 表示收缩未完成。撤回一个核中的一条未必修复其他冲突。解释说明联合不相容，不宣称逐步证明。未取得核时不生成虚假的顶层 `conflicts`。
+
+修复方案含 `removed_input_ids/changed_owner_ids/cost/optimality/verified`，先最少归属组，再最少输入条数；无玩家归属的输入各算独立组。public 固定不撤，每个方案均重验完整剩余问题可满足。撤回不增加原命题的否定，不表示谁撒谎或已替换真实身份。最优代价与方案列举完整性分别用 `optimality` 和 `complete` 表示；次数／时间不足不得当作没有解。
+
+世界按全体玩家的初始角色联合投影去重，不是各人范围的笛卡尔积，也不代表概率。仅 `complete:true` 时 `total` 是精确总数，否则为 null；截断原因为 `max_worlds/solver_unknown/deadline`。旧 `trouble_brewing:possible_roles` 保守保留未判定角色，并附 `unknown_role_ids/complete`，避免把超时误当作排除。
+
 ## 关键语义
 
 ### 时间
@@ -64,7 +106,7 @@
 
 ### facts：confirmed 与 reported
 
-- `status: "confirmed"`：**硬约束**。例如自己确认的真实身份、自己技能读到的结果。
+- `status: "confirmed"`：已确认来源的输入，启用后必须满足；它仍可能属于可撤回的 conditional 输入，不自动成为公共依据。
 - `status: "reported"`：**玩家声明**，来源是玩家自述而非客观确认。启用（`enabled: true`）后作为**可撤销的推理假设**参与本次推理，而不是永久硬约束；玩家可以在下一次请求里撤销或改为 `enabled: false`。玩家声称的身份不等于其真实身份（角色声明在当前模型里对应「自认身份」，见下）。
 - `enabled: false`：该条事实不参与本次推理。
 
@@ -207,7 +249,7 @@ HTTP 错误响应体：
 
 ## 与其他目录的关系
 
-- 推理内核接口见 [`../../engine/README.md`](../../engine/README.md)。
+- 推理模型见 [`../../botc_reasoner/README.md`](../../botc_reasoner/README.md)。
 - 当前 HTTP 实现见 [`../../backend/README.md`](../../backend/README.md)：顶层入口 `main.py web` 默认注入真实适配器 `connector.TroubleBrewingAdapter`，对 `examples/request.json` 返回示例描述的 `sat`/`necessary`；框架默认 placeholder 适配器（直接调用 `create_server()` 时）则返回 `consistency: "unknown"`。
 - 本协议描述的是网页/后台契约，后台实现需自行完成运行时校验（TypeScript 类型无法在运行时校验）。
 

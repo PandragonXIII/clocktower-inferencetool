@@ -72,10 +72,9 @@
 ## Information
 [血染钟楼-暗流涌动 wiki](https://clocktower-wiki.gstonegames.com/index.php?title=%E6%9A%97%E6%B5%81%E6%B6%8C%E5%8A%A8)
 
-## 推理引擎
-- [暗流涌动 Z3 模型](botc_reasoner/README.md)：`botc_reasoner/` 直接使用 Z3 建模暗流涌动规则，**不调用 `engine.ReasoningEngine`**。
-- [Engine 使用说明](engine/README.md)：通用 Z3 约束封装，不含 BOTC 规则。
-- [Engine 测试说明](tests/README.md)
+## 推理模型
+- [暗流涌动 Z3 模型](botc_reasoner/README.md)：`botc_reasoner/` 是唯一的推理模型，直接使用 Z3 建模暗流涌动规则。
+- [推理模型 smoke 测试说明](tests/README.md)
 
 ### 真实推理接口（connector.py）
 网页协议 JSON → `botc_reasoner` 模型 → 推理结果的桥在根目录 `connector.py`。它既被 `main.py web` 注入为默认适配器（真正运行求解器），也可独立使用：

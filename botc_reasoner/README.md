@@ -1,8 +1,10 @@
 # botc_reasoner：暗流涌动 Z3 规则模型
 
+后续转换层、可审阅规则组织、冲突解释、最少变更与恒真推理的设计见 [框架与迁移规划](DESIGN.md)。该文档是拟议设计，当前实现和限制仍以本页为准。
+
 `botc_reasoner/` 是《暗流涌动》（Trouble Brewing）的**直接 Z3 模型**：它把角色、配置、时间轴、中毒/醉酒、夜间击杀、白天处决等规则写成 Z3 布尔约束，并提供声明变量、装载规则、查询可满足性的 Python 接口。
 
-> **它不调用 `engine.ReasoningEngine`。** `engine/` 是通用 Z3 约束封装；本目录完全绕过它，直接用 `z3-solver` 建模暗流涌动。两者没有依赖关系。
+> **这是本项目唯一的推理模型。** 它直接用 `z3-solver` 建模暗流涌动，没有额外的通用引擎抽象层。
 >
 > **`connector.py` 才是 JSON 桥。** 网页协议 JSON → Z3 命题 → 推理结果这条链路在仓库根目录的 `connector.py`，不在本目录。本目录只提供模型与规则。参见[与 connector.py 的关系](#与-connectorpy-的关系)。
 
@@ -15,11 +17,10 @@ web/ 前端 ──POST /api/v1/reason──► backend/http_server.py ──校�
                                                         botc_reasoner/  ← 直接 Z3 建模（本目录）
 ```
 
-| 组件 | 作用 | 是否调用 engine |
-| --- | --- | --- |
-| `botc_reasoner/`（本目录） | 暗流涌动变量与规则，直接 Z3 | 否 |
-| 根 `connector.py` | 网页协议 JSON ↔ 模型 ↔ 响应；也能独立起服务 | 否（直接用 botc_reasoner） |
-| `engine/` | 通用 Z3 约束/查询封装，不含 BOTC 规则 | — |
+| 组件 | 作用 |
+| --- | --- |
+| `botc_reasoner/`（本目录） | 暗流涌动变量与规则，直接 Z3 |
+| 根 `connector.py` | 网页协议 JSON ↔ 模型 ↔ 响应；也能独立起服务 |
 | `backend/` | HTTP 路由与运行时校验，适配器可注入；框架默认 placeholder 时不使用任何求解器，`main.py web` 注入本目录的真实适配器 |
 
 ## 文件分工
@@ -30,12 +31,20 @@ web/ 前端 ──POST /api/v1/reason──► backend/http_server.py ──校�
 | `variables.py` | 声明全部布尔未知量（身份、自认、存活、状态、夜间行动、技能发动、死亡、提名投票、误注册）及**域公理**；`TroubleBrewingVars`、`declare_variables`、`Moment`、`Ability`、`Query`、`build_solver` | 是 |
 | `rules.py` | 把暗流涌动规则写成约束：`add_setup_rules`（人数/男爵）、`add_game_rules`（装载当前已实现规则）、私有辅助函数 `_add_information` 等 | 是 |
 | `conflict.py` | `minimal_unsatisfiable_subset`：从输入命题中抽取**极小（不可再删）**不可满足子集 | 是 |
+| `provenance.py` | 规则来源追踪：`RuleSpec` / `ConstraintRecord` / `ConstraintCollector`（用 `context` 把约束绑定到规则、实例与 owner），只收集不求解 | 否（仅用 `BoolRef` 类型） |
+| `inputs.py` | 把请求的 `facts` / `assumptions` 编译为 `analysis.InputConstraint`：按 scope/source/owner 分类，表达式由注入的 callable 提供，不声明变量、不建约束 | 否（仅用 `BoolRef` 类型） |
+| `analysis.py` | 分析辅助层：`Budget`（总/单次时间预算）、`InputConstraint`、`build_solver`、`check_scope`、`query_status`、`diagnose`（分组 gate + 不可满足核 + inclusion-minimal 收缩） | 是 |
+| `repairs.py` | `minimum_repairs`：有界、已验证的**撤回**建议（先最小化 owner 数、再最小化输入条数），`public` 输入固定，不替换角色 | 是 |
+| `worlds.py` | `enumerate_worlds`：在已备好的 solver 上逐模型枚举联合世界并按投影去重，用 `complete` / `total` / `truncated_reason` 诚实标注完整性 | 是 |
+| `pipeline.py` | `analyze`：编排一次请求的两轨求解（public / conditional）、查询、诊断、修复、世界枚举与角色范围，产出响应扩展 | 是 |
 
 职责边界：
 - `roles.py` 只放静态事实，不建约束。
 - `variables.py` 只声明「未知量是什么形状」（每位玩家每断面恰好一个角色、每次行动恰好一个目标等），**不含剧本规则**。
-- `rules.py` 才连接真实身份、自认、中毒、死亡与信息结果。
-- `connector.py` 负责把外部 JSON 的命题映射到上述变量（`start_is` / `belief_bit` / 扩展事实）。
+- `rules.py` 才连接真实身份、自认、中毒、死亡与信息结果；`provenance.py` 只记录约束的规则来源。
+- `inputs.py` 只做输入分类与元数据整理，不重写「真实命题 / belief」映射。
+- `analysis.py` 只接收已备好的表达式做求解与诊断，`pipeline.py` 负责把各层串起来。
+- `connector.py` 负责把外部 JSON 的命题映射到上述变量（`start_is` / `belief_bit` / 扩展事实），并调用 `pipeline.analyze`。
 
 ## 时间与座位约定
 
@@ -153,21 +162,73 @@ solver.push(); solver.add(Not(q));   negative = solver.check(); solver.pop()
 
 `alignment` 命题目前**直接约束真实阵营**（`_proposition_expr` 的 alignment 分支返回真实角色集合的 `Or`，未区分 `reported`）。即声明阵营会被当作真实阵营约束。这与角色声明的「自认」语义不同；二者是否统一、`reported` alignment 是否应改为软信息，**待产品明确**，此处不判定为缺陷。
 
+## 结论的两类与 scope（已实现）
+
+输入分类在 `inputs.py` 编译为带元数据的约束，`pipeline.analyze` 分别对 **public** 与 **conditional**
+两条轨道求解，结论用 `scope` 标注轨道（细节见 [DESIGN.md](DESIGN.md) §1、§2）。
+
+- **结论只有两类**：**public 必然**与 **conditional 必然**。不存在第三类来源。
+- **public 默认分类只有两种**：`confirmed` 的 **night deaths**（公开死亡公布）与 **settled day vote**
+  （已结算白天处决）。其余条目**默认 conditional**。其他条目要成为 public 输入，必须显式声明
+  `extensions["reasoner:scope"]="public"` 且 `status="confirmed"`。
+- **`reported` 不允许升级为 public**——公开说了不等于内容为真。私密观察即便 `confirmed` 也默认
+  conditional。
+- **只有 `reported` role 声明映射为自认身份（belief）**（现状语义，见上节）；`confirmed` role 命题
+  仍旧映射真实命题以保持兼容，**不默默改成 belief**。scope 分类与「映射真实命题还是 belief」是两件
+  独立的事（`inputs.py` 只分类，不重写映射）。
+- **来源（source）只用于展示与修复追溯**：`received`（收到的观察）、`self_claim`（玩家自述 role 声明）、
+  `observation`（其余确认条目）、`assumption`（用户假设）。它不决定 public/conditional，也不构成额外
+  推理类别。可用 `extensions["reasoner:source"]` 覆盖记录值。
+- **声明所有者（owner）**：`extensions["reasoner:owner_id"]` 优先，否则取 role/alignment 命题的 `player_id`，
+  或技能观察的 `data.actor_id`。owner 用于展示与修复的最小变更代价统计，不是语义轴。
+- **收到数字是事件事实，不等于数字正确**：private 观察内容对错由健康/注册规则决定，不能因为它是
+  private 就断言必错，也不能因为被收到就断言必对。
+- public 轨道矛盾时 public 冲突返回 `inconsistent`，**不可推任意命题**；public sat 但 conditional unsat
+  时仍返回 public 结果。`scope` 字段只有 `public` / `conditional` 两个取值。
+
+字段与响应结构以 [`web/protocol/README.md`](../web/protocol/README.md) 的协议契约为准；本页只描述模型侧语义。
+
 ## 当前限制 / 待修正（先读）
 
 以下问题来自代码审阅及针对性验证，尚无完整对局的集成测试覆盖。它们不是设计意图。行号易变，以函数名为准。
 
-1. **CLI 的能力输入可能静默丢弃或缺少校验**（`connector._ability`）：如占卜师目标不足两人，分支未匹配会返回 `None`；厨师分支本身不检查是否首夜。HTTP 路径通过 `backend.extension_validation` 拦截此类格式错误和不支持的观察，但 CLI 直接调用连接器不经过这些检查。`kind == "unobserved"` 是合法的「无观察结果」，两条路径都刻意不生成约束。
+1. **CLI 的能力输入不做协议校验**（`connector._ability`）：如占卜师目标不足两人，分支未匹配会返回 `None`；厨师分支本身不检查是否首夜。HTTP 路径通过 `backend.extension_validation` 拦截此类格式错误和不支持的观察，但 CLI 直接调用连接器不经过这些检查。`kind == "unobserved"` 是合法的「无观察结果」，两条路径都刻意不生成约束。
 
-2. **未知引用可能 `KeyError`**：`connector._night_deaths` / `_execution` 用 `seats[player_id]` 直接索引，未知玩家抛 `KeyError`；`_ability` 只捕获 `ValueError`，而 `role_from_name` 对未知 `role_id` 抛 `KeyError`，同样逃逸。`_reason` 只捕获 `ValueError`，最终在 HTTP 层变成 **500**。HTTP 路径会先经 `backend.extension_validation` 拦截未知玩家/角色，但 **CLI 路径不校验**，仍可直接触发。
+2. **冲突解释是规则组级，不是逐步证明**（`analysis.diagnose`）：诊断把域公理、每条规则、每条输入各作一个 gate，取不可满足核并做 inclusion-minimal 收缩，只报告「哪些输入与哪些规则组不能同时成立」，`minimality` 仅在收缩完成时为 `"inclusion"`，否则为 `"unverified"`。它**不**给出事件级、步骤级的推导链（DESIGN §9.4 的 `proof` 结构尚未实现）。
 
-3. **候选角色枚举提前停止且无完整标志**（`connector._possible_roles` 的 `while solver.check() == sat`）：一旦某次求解返回 `unknown`，循环直接结束，**不标记候选集不完整**，会得到看似完整的错误候选列表。
+3. **修复只撤回输入，不做角色替换**（`repairs.minimum_repairs`）：候选通过从问题中「移除」可撤销输入得到，代价依次为「变更的 owner 数」再「移除条数」；每个候选都在移除后的**整体问题**上重新求解并验证 `sat`。`public` 输入固定不可移除，`identity_only` 只撤回身份声明。撤回**不等于**反证为假，**不支持**把某条声明替换成另一条（DESIGN §6.3 的 replacement 未实现）。超时或达到搜索上限时只标注 `optimality:"unknown"`，不假装最优或不存在修复。
 
-4. **冲突异常未捕获可致 HTTP 500**（`connector._reason` 的 `unsat` 分支在 `try` 之外调用 `minimal_unsatisfiable_subset`）：该函数背景不可满足时抛 `ValueError`、超时抛 `TimeoutError`，均未捕获，会在 HTTP 层变成 **500**。另注意它返回的是**极小（不可再删）子集，不是最少条数子集**（`conflict.py` 文档已说明）。
+4. **事件级因果与角色模块仍是规划**：当前规则仍由 `rules.py` 的巨型入口组织，未按 DESIGN §3 拆到事件级时间轴，也未按 §4 拆成角色模块 + 中央服务。
+
+5. **网页 UI 未渲染新扩展**：`reasoner:scopes` / `reasoner:inputs` / `reasoner:conclusions` / `reasoner:diagnosis` / `reasoner:repairs` / `reasoner:worlds` / `reasoner:role_ranges` / `reasoner:timeout` 已在响应中返回，但前端尚未展示。
+
+6. **尚无完整对局的集成测试覆盖**：上面的推理路径只经过针对性单元/冒烟测试，不能据此宣称已覆盖完整对局。
 
 HTTP 的三类已知扩展由 `backend.extension_validation` 校验，`enabled:true` 的受支持数据可正常提交：结构非法或引用错误返回 `400`，当前模型不支持的组合返回 `422`。`enabled:false` 仅供记录、不解析载荷、不参与求解。`capabilities.scripts` 使用协议规定的 `{ id, name }` 对象数组；声明某类输入受支持不代表该类所有角色和结果组合都已建模。
 
-性能相关（非缺陷，但需知晓）：每条 query 两次求解；候选枚举对每名玩家反复求解；`TroubleBrewingAdapter` 用实例锁 `self._lock` 串行化所有请求；`options.timeout_ms` 是**每次 solve** 的超时，不是整体请求预算。
+## 选项与时间预算
+
+`pipeline.analyze` 从 `request["options"]` 读取以下参数（括号为默认值）：
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `total_timeout_ms` | `8000` | 整段分析的总时长上限（毫秒）。`Budget.total_ms`。 |
+| `timeout_ms` | `1000` | **每次** solve 的上限（毫秒）。`Budget.per_solve_ms`。 |
+| `max_worlds` | `0` | 候选世界枚举上限；`0` 表示不枚举。 |
+| `max_repairs` | `0` | 修复方案返回数量上限；`0` 表示跳过修复搜索。 |
+| `max_repair_checks` | `128` | 修复搜索的求解次数上限。 |
+
+时间预算语义（`analysis.Budget`）：`total_timeout_ms` 是**整段分析**的总预算，`timeout_ms` 是**单次**求解的上限；每次求解取「总预算剩余」与 `timeout_ms` 的较小值。预算只覆盖 analysis 阶段的求解，**不包含**变量声明、规则收集与建模（构建）耗时，也不包含 `TroubleBrewingAdapter._lock` 的排队等待；它是分析层的软预算，**不是 HTTP 层的硬截止**，请求可能在预算耗尽后才返回。预算耗尽时对应轨道与查询会标 `unknown`，并附 `reason`（`reasoner:timeout.hit`）。
+
+性能相关（非缺陷，但需知晓）：每条 query 两次求解；候选角色（`reasoner:role_ranges`）对每名玩家反复求解；`TroubleBrewingAdapter` 用实例锁 `self._lock` 串行化所有请求。
+
+### 候选世界（`reasoner:worlds`）
+
+以初始配置（`setup`）为投影，逐个枚举联合世界。blocking clause 只阻断**本次投影中为真的位**，因此隐藏变量不同、投影相同的模型不会重复计数。`complete=True` 时 `total` 才是精确计数；达到 `max_worlds` 或预算耗尽时为 `complete=False`、`truncated_reason` 标明 `"max_worlds"` / `"deadline"` / `"solver_unknown"`，且 `total` 为 `null`。`total` 只是计数，不是概率，也不代表各世界等可能。
+
+### 修复方案（`reasoner:repairs`）
+
+仅当条件背景 `unsat` 且 `max_repairs > 0` 时搜索，分 `identity`（只撤回身份声明）与 `general` 两组。最优代价按「先变更的 owner 数、再撤回条数」排序；`public` 输入固定不可撤回；每个候选都在撤回后的**整体问题**上重新求解并验证 `sat`，验证通过才计入 `candidates`。返回数量达到 `max_repairs` 或搜索次数达到 `max_repair_checks` 时提前停止，但已找到的最优代价仍标注 `optimality:"optimal"`（方案未必列全，见 `reason`）。
 
 ## 扩展事实 data 格式（按 connector 实际实现）
 
@@ -203,5 +264,4 @@ HTTP 的三类已知扩展由 `backend.extension_validation` 校验，`enabled:t
 
 - 项目总览：[../README.md](../README.md)
 - JSON 桥与 CLI/HTTP：[../connector.py](../connector.py)（使用说明见本页）
-- 通用推理引擎：[../engine/README.md](../engine/README.md)
 - 后台/协议：[../backend/README.md](../backend/README.md)、[../web/protocol/README.md](../web/protocol/README.md)

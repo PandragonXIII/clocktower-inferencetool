@@ -1,10 +1,18 @@
 # 测试说明
 
-`tests/` 下有引擎、后端、连接器、扩展校验、入口五个套件，均由顶层 `main.py test` 统一运行。
+`tests/` 下的测试均由顶层 `main.py test` 统一运行。
 
-## Engine 测试（`test_engine.py`）
+双层分析与来源测试见 `test_analysis.py`、`test_inputs.py`、`test_provenance.py`；预算及元数据校验见 `test_analysis_validation.py`；最少撤回和联合投影枚举见 `test_repairs.py`、`test_worlds.py`。覆盖公共结论不受条件冲突污染、unknown 不误排身份、最优代价与方案完整性分开、public 不撤回以及投影去重。
 
-覆盖通用推理引擎的可满足性、身份查询结果（可能/必然/不可能/前提矛盾）、冲突标签、临时假设隔离、tracker 变量名冲突、自动标签、超时参数校验。
+## 推理模型 smoke 测试（`test_reasoner_smoke.py`）
+
+对直接 Z3 模型 `botc_reasoner` 的少量有意义检查，替代已删除的通用 `engine` 测试：
+
+- 角色目录自检 `validate_catalog()` 通过、`BASE_SETUP` 覆盖 5–15 人且每档恰好一名恶魔。
+- 5 人局装载 `add_game_rules` 后可满足，且两名玩家同为厨师为 `unsat`（角色唯一性）。
+- `main.run_demo` 实际运行返回 `0`。
+
+`botc_reasoner` 的完整规则自检见其自身 `-m` 入口（`botc_reasoner/README.md`）。
 
 ## Connector 测试（`test_connector.py`）
 

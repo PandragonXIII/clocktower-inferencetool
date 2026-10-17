@@ -67,7 +67,7 @@ export interface AlignmentProposition {
 export type Proposition = RoleProposition | AlignmentProposition;
 
 // 事实的公共字段。
-// status：confirmed 是硬约束；reported 是玩家声明，来源是玩家自述而非客观确认，
+// status：confirmed 区分确认来源（仍可属于 conditional）；reported 是玩家声明，
 //   启用后作为可撤销的推理假设参与本次推理（玩家可在下一次请求中撤销），并不表示客观为真。
 // enabled：false 时该条事实不参与本次推理。
 interface FactBase {
@@ -174,6 +174,58 @@ export interface Query {
 export interface Options {
   // 每次 solve 的超时（毫秒），不是整体请求预算。一次请求可能执行多次 solve。
   timeout_ms?: number;
+  // 分析总预算，默认 8000，1..60000；不含构建与排队。
+  total_timeout_ms?: number;
+  // 初始角色联合世界数量上限，默认 0（关闭），0..100。
+  max_worlds?: number;
+  // 每类最优撤回方案返回上限，默认 0（关闭），0..10。
+  max_repairs?: number;
+  // 每类修复搜索的求解次数上限，默认 128，1..1024。
+  max_repair_checks?: number;
+}
+
+// 以下类型说明 reasoner:* 扩展；运行时仍由后端校验。
+export type ReasonerScope = "public" | "conditional";
+export type ReasonerSource = "received" | "self_claim" | "assumption"
+  | "public_announcement" | "observation";
+
+export interface ReasonerInputExtensions {
+  // 仅 confirmed 事实可显式 public；假设始终 conditional。
+  "reasoner:scope"?: ReasonerScope;
+  "reasoner:source"?: ReasonerSource;
+  "reasoner:owner_id"?: string;
+}
+
+export interface ReasonerScopeResult {
+  consistency: Consistency;
+  input_ids: string[];
+  results: QueryResult[];
+}
+
+export interface ReasonerRoleRange {
+  player_id: string;
+  seat: number;
+  role_ids: string[];
+  impossible_role_ids: string[];
+  unknown_role_ids: string[];
+  complete: boolean;
+}
+
+export interface ReasonerRepairCandidate {
+  removed_input_ids: string[];
+  changed_owner_ids: string[];
+  cost: { owners: number; inputs: number };
+  optimality: "optimal";
+  verified: boolean;
+}
+
+export interface ReasonerWorlds {
+  worlds: { roles: Record<string, string> }[];
+  complete: boolean;
+  returned_count: number;
+  total: number | null;
+  truncated_reason: "max_worlds" | "solver_unknown" | "deadline" | null;
+  time: { phase: "setup" };
 }
 
 export interface ReasonRequest {

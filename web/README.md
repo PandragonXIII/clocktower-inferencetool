@@ -233,4 +233,4 @@ git diff --check
 
 - 协议：[protocol/README.md](protocol/README.md)
 - 后台/API：[../backend/README.md](../backend/README.md)
-- 推理内核：[../engine/README.md](../engine/README.md)
+- 推理模型：[../botc_reasoner/README.md](../botc_reasoner/README.md)

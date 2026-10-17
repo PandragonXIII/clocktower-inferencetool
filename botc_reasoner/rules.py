@@ -17,6 +17,7 @@ from z3 import (
     Xor,
 )
 
+from botc_reasoner.provenance import ConstraintCollector, rule_context
 from botc_reasoner.roles import (
     DEMONS,
     GOOD_ROLES,
@@ -28,6 +29,9 @@ from botc_reasoner.roles import (
     Role,
 )
 from botc_reasoner.variables import Ability, Moment, Query, QueryKind, TroubleBrewingVars
+
+WIKI_URL = "https://clocktower-wiki.gstonegames.com/index.php?title=%E6%9A%97%E6%B5%81%E6%B6%8C%E5%8A%A8"
+"""规则依据：钟楼百科《暗流涌动》页面。"""
 
 
 def add_setup_rules(
@@ -91,15 +95,45 @@ def add_game_rules(
     包含开局人数、酒鬼标记、干扰项、恶魔伪装、中毒与醉酒、身份和存活的延续、
     夜间恶魔击杀、星坠、红唇女郎、猎手、贞洁者、投票处决，以及健康角色收到的信息。
     镇长三人获胜、圣徒处决落败只结束游戏，不改写这些变量，因此不在这里。
+
+    ``solver`` 可以是普通 Z3 ``Solver``，也可以是 :class:`~botc_reasoner.provenance.ConstraintCollector`：
+    后者没有 ``context`` 之外的 ``add`` 差异，规则体只调用 ``add``，因此同一段代码既能真的加进求解器，
+    也能只收集带来源的约束。
     """
 
-    add_setup_rules(solver, world, c, f, h, d)
-    _add_opening_secrets(solver, world)
-    _add_poison_and_drunk(solver, world)
-    _add_continuity(solver, world)
-    _add_night_kills(solver, world)
-    _add_day_rules(solver, world)
-    _add_information(solver, world)
+    with rule_context(solver, "tb:setup", "开局配置", source=WIKI_URL):
+        add_setup_rules(solver, world, c, f, h, d)
+    with rule_context(solver, "tb:opening", "开局秘密", source=WIKI_URL):
+        _add_opening_secrets(solver, world)
+    with rule_context(solver, "tb:poison_drunk", "中毒与醉酒", source=WIKI_URL):
+        _add_poison_and_drunk(solver, world)
+    with rule_context(solver, "tb:continuity", "身份与存活延续", source=WIKI_URL):
+        _add_continuity(solver, world)
+    with rule_context(solver, "tb:night_kills", "夜间击杀", source=WIKI_URL):
+        _add_night_kills(solver, world)
+    with rule_context(solver, "tb:day_rules", "白天规则", source=WIKI_URL):
+        _add_day_rules(solver, world)
+    with rule_context(solver, "tb:information", "信息类技能", source=WIKI_URL):
+        _add_information(solver, world)
+
+
+def collect_game_rules(
+    world: TroubleBrewingVars,
+    c: int,
+    f: int,
+    h: int,
+    d: int,
+) -> ConstraintCollector:
+    """收集 :func:`add_game_rules` 的约束及来源元数据，**不**求解、**不**含变量域公理。
+
+    返回的 :class:`~botc_reasoner.provenance.ConstraintCollector` 含 ``records``（逐条约束 +
+    规则编号 + 稳定实例编号）与 ``catalog``（规则编号 → :class:`RuleSpec`），供冲突解释、
+    修复追溯使用。变量域公理仍由调用方按需通过 ``world.encoding_axioms()`` 加入。
+    """
+
+    collector = ConstraintCollector()
+    add_game_rules(collector, world, c, f, h, d)
+    return collector
 
 
 def _add_opening_secrets(solver: Solver, world: TroubleBrewingVars) -> None:
@@ -283,9 +317,12 @@ def _add_night_kills(solver: Solver, world: TroubleBrewingVars) -> None:
 
 def _add_day_rules(solver: Solver, world: TroubleBrewingVars) -> None:
     for day in world.days:
-        _add_votes_and_virgin(solver, world, day)
-        _add_slayer(solver, world, day)
-        _add_butler(solver, world, day)
+        with rule_context(solver, "tb:votes_virgin", "投票与贞洁者", source=WIKI_URL):
+            _add_votes_and_virgin(solver, world, day)
+        with rule_context(solver, "tb:slayer", "猎手", source=WIKI_URL):
+            _add_slayer(solver, world, day)
+        with rule_context(solver, "tb:butler", "管家", source=WIKI_URL):
+            _add_butler(solver, world, day)
         proc = _scarlet_woman_proc(world, day)
         for player in world.player_ids:
             alive_after = And(

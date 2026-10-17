@@ -267,16 +267,50 @@ class CoreDisabledTests(unittest.TestCase):
 
 
 class HorizonTests(unittest.TestCase):
-    """Document current horizon behaviour; fixing it is out of scope.
+    """``connector._horizon`` skips disabled facts/assumptions.
 
-    ``connector._horizon`` scans every fact's time even when the fact is
-    disabled, so a disabled night-2 extension still enlarges the declared model
-    (more nights = more variables). This test records that behaviour so a
-    future change is a deliberate decision, not an accident.
+    Enabled entries still widen the declared horizon; disabled ones are ignored
+    (queries have no ``enabled`` switch and are always scanned).
     """
 
-    def test_disabled_extension_time_still_extends_horizon(self):
+    def test_disabled_extension_time_does_not_extend_horizon(self):
         request = game_request([night_deaths_fact("f-off", enabled=False, number=2)])
+        self.assertEqual(connector._horizon(request), 1)
+
+    def test_enabled_extension_time_extends_horizon(self):
+        request = game_request([night_deaths_fact("f-on", enabled=True, number=2)])
+        self.assertEqual(connector._horizon(request), 2)
+
+    def test_disabled_assumption_time_does_not_extend_horizon(self):
+        request = game_request([])
+        request["assumptions"] = [
+            {
+                "id": "a-off",
+                "enabled": False,
+                "proposition": {
+                    "kind": "role",
+                    "player_id": "p1",
+                    "role_id": "chef",
+                    "time": {"phase": "night", "number": 3},
+                },
+            }
+        ]
+        self.assertEqual(connector._horizon(request), 1)
+
+    def test_query_time_still_extends_horizon(self):
+        request = game_request([])
+        request["queries"] = [
+            {
+                "id": "q-1",
+                "kind": "role",
+                "proposition": {
+                    "kind": "role",
+                    "player_id": "p1",
+                    "role_id": "chef",
+                    "time": {"phase": "night", "number": 2},
+                },
+            }
+        ]
         self.assertEqual(connector._horizon(request), 2)
 
 
