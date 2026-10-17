@@ -128,6 +128,8 @@ def _help_text() -> str:
     酒鬼使各夜信息一起失效时，把这些写法数合成一个 M，再乘一次 1/(1+log2(M))。
     红鲱鱼整局是同一名善良玩家（可以已死，也可以是占卜师自己）。
     能同时解释全部清醒占卜结果的善良玩家占全部善良玩家的比例，也乘进该局。
+    洗衣妇、图书管理员、调查员若清醒属实，把陪衬人数和在场的该类角色人数相乘得到 M，
+    再乘 1/(1+log2(M))。调查员通常只有一名爪牙，M 就只剩陪衬人数。
     这个乘数留在合计里，不在组内被归一掉。
     逻辑上无解的组不计入。自称镇民时，酒鬼的面具就是该镇民。
 身份 <玩家> <角色>
@@ -138,8 +140,16 @@ def _help_text() -> str:
 公开事实，可靠性 100%：
 夜间死亡 <夜> <玩家>
     黎明公布的夜间死亡，从第 2 夜起。例：夜间死亡 2夜 3
+无人死亡 <夜>
+    这一夜黎明没有人死于夜间。某一夜若没有人死去，必须输入这一条，
+    否则求解器会把「谁在这一夜死去」当成可以自由分配。例：无人死亡 2夜
+    也可以写成：夜间死亡 2夜 无
 处决 <天> <玩家>
     白天处决，含投票和贞洁者。例：处决 1天 4
+无人处决 <天>
+    这一天没有人被处决。某一天若没有人被处决，必须输入这一条，
+    否则求解器会把「谁被处决」当成可以自由分配。例：无人处决 1天
+    也可以写成：处决 1天 无
 猎手死亡 <天> <玩家>
     死于猎手射击，不是处决。例：猎手死亡 1天 5
 
@@ -259,17 +269,10 @@ def _parse_fact(line: str, player_count: int) -> Statement:
             setup_only=True,
             pin="drunk",
         )
-    if kind == "夜间死亡":
-        night, player = _time_and_player(tokens[1:], player_count, "夜", "夜间死亡 <夜> <玩家>")
-        if night < 2:
-            raise ValueError("首夜没有夜间死亡")
-        return _public(
-            lambda world, night=night, player=player: world.night_death[night][player],
-            night,
-        )
-    if kind == "处决":
-        day, player = _time_and_player(tokens[1:], player_count, "天", "处决 <天> <玩家>")
-        return _public(lambda world, day=day, player=player: world.executed[day][player], day)
+    if kind in {"夜间死亡", "无人死亡"}:
+        return _night_death_statement(tokens, player_count, kind)
+    if kind in {"处决", "无人处决"}:
+        return _execution_statement(tokens, player_count, kind)
     if kind == "猎手死亡":
         day, player = _time_and_player(tokens[1:], player_count, "天", "猎手死亡 <天> <玩家>")
         return _public(lambda world, day=day, player=player: world.slayer_kill[day][player], day)
@@ -310,6 +313,51 @@ def _belief(player: int, role: Role) -> Statement:
         setup_only=True,
         pin="belief",
     )
+
+
+def _night_death_statement(tokens: list[str], player_count: int, kind: str) -> Statement:
+    """夜间死亡。``无人死亡 <夜>`` 或 ``夜间死亡 <夜> 无`` 表示这一夜没有人死去。"""
+
+    if kind == "无人死亡" or (len(tokens) == 3 and tokens[2] == "无"):
+        if len(tokens) not in {2, 3}:
+            raise ValueError("格式：无人死亡 <夜>")
+        night, phase = _time(tokens[1])
+        if phase != "夜":
+            raise ValueError("格式：无人死亡 <夜>")
+        if night < 2:
+            raise ValueError("首夜没有夜间死亡")
+        return _public(
+            lambda world, night=night: And(
+                *[Not(world.night_death[night][player]) for player in world.player_ids]
+            ),
+            night,
+        )
+    night, player = _time_and_player(tokens[1:], player_count, "夜", "夜间死亡 <夜> <玩家>")
+    if night < 2:
+        raise ValueError("首夜没有夜间死亡")
+    return _public(
+        lambda world, night=night, player=player: world.night_death[night][player],
+        night,
+    )
+
+
+def _execution_statement(tokens: list[str], player_count: int, kind: str) -> Statement:
+    """处决。``无人处决 <天>`` 或 ``处决 <天> 无`` 表示这一天没有人被处决。"""
+
+    if kind == "无人处决" or (len(tokens) == 3 and tokens[2] == "无"):
+        if len(tokens) not in {2, 3}:
+            raise ValueError("格式：无人处决 <天>")
+        day, phase = _time(tokens[1])
+        if phase != "天":
+            raise ValueError("格式：无人处决 <天>")
+        return _public(
+            lambda world, day=day: And(
+                *[Not(world.executed[day][player]) for player in world.player_ids]
+            ),
+            day,
+        )
+    day, player = _time_and_player(tokens[1:], player_count, "天", "处决 <天> <玩家>")
+    return _public(lambda world, day=day, player=player: world.executed[day][player], day)
 
 
 def _public(build: Callable, nights: int) -> Statement:

@@ -17,7 +17,6 @@ window.Roundtable = (() => {
     const identityEntries = [...assumptions, ...facts.filter((f) => f.status === "reported" && ["role", "alignment"].includes(f.type))];
     const section = el("section", undefined, "game-records"); section.setAttribute("aria-labelledby", "records-title");
     const title = el("h3", "假设与动作"); title.id = "records-title"; section.append(title);
-    section.append(el("p", "当前对局全部时点的记录，包含停用假设；不随圆桌玩家或展示时间切换。身份后的 ? 表示假设，不是已确认身份。", "hint"));
     const error = el("p", "", "warning"); error.setAttribute("role", "alert"); section.append(error);
     const playerName = (id) => { const p = players.find((v) => v.id === id); return p ? `${p.seat} 号 · ${p.name || p.id}` : id || "未知玩家"; };
     const raw = (card, entry) => { const d = el("details"); d.append(el("summary", "完整来源数据"), el("pre", JSON.stringify(entry, null, 2))); card.append(d); };
@@ -41,7 +40,7 @@ window.Roundtable = (() => {
       const head = el("div", undefined, "record-head"), copy = el("div", undefined, "record-copy");
       copy.append(el("h5", `${name}${p.kind === "alignment" ? " · 阵营假设" : ""}`), el("p", `${playerName(p.player_id)} ｜ ${time}`));
       const observationId = obj(a.extensions)["ui:observation_id"];
-      copy.append(el("p", `${a.status === "reported" ? "来源：身份声明（reported，非硬约束）" : observationId ? `来源：动作关联 · ${observationId}` : "来源：手工"} · ${enabled ? "已启用" : "已停用，不参与"}`, "hint"));
+      copy.append(el("p", a.status === "reported" ? "身份声明" : observationId ? "动作关联" : "手工", "hint"));
       const label = el("label", undefined, "assumption-switch"), check = el("input"); check.type = "checkbox"; check.setAttribute("role", "switch"); check.checked = enabled; check.dataset.focus = `assumption-${a.id}`;
       check.setAttribute("aria-label", `${enabled ? "停用" : "启用"} ${playerName(p.player_id)} 在${time}的${value(p) === undefined ? name : valueName(p.kind, value(p))}${p.kind === "alignment" ? "阵营" : "身份"}假设`);
       check.addEventListener("change", () => mutate(() => window.App.setIdentityEnabled(a.id, check.checked), () => { check.checked = enabled; }));
@@ -57,7 +56,8 @@ window.Roundtable = (() => {
     actions.forEach((f) => {
       const data = obj(f.data), result = obj(data.result), skill = window.ClocktowerSkills.all.find((s) => s.id === data.ability_id);
       const card = el("article", undefined, "evidence record-card"); card.dataset.observation = f.id;
-      card.append(el("h5", skill?.name || `${data.ability_id || "未知技能"}（${roles[data.role_id] || data.role_id || "未知角色"}）`), el("p", `发动者：${playerName(data.actor_id)} ｜ ${timeName(index(data.time))}`), el("p", `目标 / 有关玩家：${arr(data.targets).map(playerName).join("、") || "无"}`));
+      card.append(el("h5", skill?.name || `${data.ability_id || "未知技能"}（${roles[data.role_id] || data.role_id || "未知角色"}）`), el("p", `${playerName(data.actor_id)} ｜ ${timeName(index(data.time))}`));
+      if (arr(data.targets).length) card.append(el("p", `目标：${arr(data.targets).map(playerName).join("、")}`));
       let resultText;
       switch (result.kind) {
         case "role": resultText = `角色：${roles[result.role_id] || result.role_id}`; break;
@@ -69,12 +69,10 @@ window.Roundtable = (() => {
         case "choice": resultText = `${skill?.result.options?.find((o) => o.value === result.value)?.label || result.value}${result.role_id ? ` · ${roles[result.role_id] || result.role_id}` : ""}`; break;
         default: resultText = "未识别的结果类型，请展开完整来源数据";
       }
-      card.append(el("p", `结果：${resultText || "未提供"}`, "observation-result"), el("p", `备注：${data.note || "无"}`), el("p", "已记录，技能结果尚未参与推理", "warning"));
-      const linked = assumptions.filter((a) => a.id === obj(f.extensions)["ui:assumption_id"]);
-      const identity = facts.find((v) => v.id === obj(f.extensions)["ui:identity_fact_id"] && v.type === "role");
-      card.append(el("p", linked.length ? `关联身份假设：${linked.map((a) => `${roles[obj(a.proposition).role_id] || obj(a.proposition).role_id} ? · ${a.enabled === true ? "已启用" : "已停用"}`).join("、")}（可能被多个动作共用）` : identity ? `复用已有${identity.status === "reported" ? "身份声明" : "确认身份"}：${roles[obj(identity.proposition).role_id] || obj(identity.proposition).role_id}（未新增假设，记录性质不变）` : "关联身份记录：无（未关联或已删除）", "hint"));
+      if (result.kind !== "no_direct_result") card.append(el("p", `结果：${resultText || "未提供"}`, "observation-result"));
+      if (typeof data.note === "string" && data.note.trim()) card.append(el("p", `备注：${data.note}`));
       remove(card, "编辑动作", () => window.PlayerActions.edit(lastRequest, f), `edit-${f.id}`);
-      remove(card, "删除动作（保留共用身份）", () => window.App.removeAbility(f.id), f.id); raw(card, f); actionList.append(card);
+      remove(card, "删除", () => window.App.removeAbility(f.id), f.id); raw(card, f); actionList.append(card);
     });
     const deaths = window.NightDeaths.records(facts);
     section.append(el("h4", `死亡记录 · ${deaths.length}`));
@@ -82,7 +80,7 @@ window.Roundtable = (() => {
     if (!deaths.length) deathList.append(el("p", "暂无死亡记录。夜晚进入下一天时确认。", "empty"));
     deaths.forEach((f) => {
       const d = obj(f.data), card = el("article", undefined, "evidence record-card"); card.dataset.death = f.id;
-      card.append(el("h5", `${timeName(index(d.time))}死亡`), el("p", d.result === "none" ? "无人死亡" : arr(d.player_ids).map(playerName).join("、") || "未识别的死亡记录，请查看完整数据"), el("p", "死亡已记录，尚未参与推理", "warning"));
+      card.append(el("h5", `${timeName(index(d.time))}死亡`), el("p", d.result === "none" ? "无人死亡" : arr(d.player_ids).map(playerName).join("、") || "未提供"));
       remove(card, "编辑死亡记录", () => window.NightDeaths.open(lastRequest, window.App.votingContext, f), `edit-${f.id}`);
       raw(card, f); deathList.append(card);
     });
@@ -124,18 +122,19 @@ window.Roundtable = (() => {
     const conditional = assumptions.some((a) => a.enabled === true);
     const atTime = (entry, id) => { const p = obj(entry.proposition); return p.player_id === id && index(p.time) === selectedTime; };
     const heading = el("div", undefined, "section-head");
-    heading.append(el("h2", "圆桌 · 玩家视图"), el("span", `${players.length} 位玩家 · 座位顺时针`, "hint")); root.append(heading);
-    root.append(el("p", placeholder ? "后台尚未接入推理" : unsat ? "输入有矛盾，未验证 · 仅展示输入，不采用推理结论" : canInfer ? `已载入匹配的查询结果${conditional ? " · 假设下推理" : ""}（来源见上方）` : "仅展示输入（含待确认声明 / 假设）· 暂无可采用的推理结论", unsat ? "round-status warning" : "round-status"));
+    heading.append(el("h2", "圆桌")); root.append(heading);
+    if (unsat) root.append(el("p", "当前条件有矛盾", "round-status warning"));
     const legend = el("div", undefined, "legend");
     [["unknown", "? 无身份候选"], ["good", "纯色蓝：确定善良"], ["evil", "纯色红：确定邪恶"], ["pending", "斜纹：阵营待确认"]].forEach(([cls, label]) => legend.append(el("span", label, `legend-${cls}`)));
-    legend.append(el("span", "身份名后 ?：声明 / 假设，尚未确认；角色与阵营独立判断。角色候选无阵营时按暗流固有阵营显示斜纹默认，仅提示不确定，不是已确认", "hint")); root.append(legend);
+    root.append(legend);
     const viewport = el("div", undefined, "table-viewport"); viewport.tabIndex = 0; viewport.setAttribute("aria-label", "玩家圆桌，窄屏可横向滚动");
     const board = el("div", undefined, "round-board");
     // 固定可读卡片尺寸，人数越多增加圆半径；窄屏仅圆桌内部滚动。
     const radius = Math.max(210, players.length * 30), size = radius * 2 + 160;
     board.style.width = `${size}px`; board.style.height = `${size}px`; board.style.setProperty("--orbit", `${radius * 2}px`);
     const center = el("div", undefined, "table-center");
-    center.append(el("span", g.script_id === "trouble_brewing" ? "暗流涌动" : g.script_id || "等待对局", "eyebrow"), el("p", `对局进度：${timeName(index(g.time))}`, "hint"), el("span", "正在展示", "hint"), el("h3", timeName(selectedTime)), el("p", g.id ? `对局 ${g.id} · 版本 ${g.revision ?? "—"}` : "请载入示例或导入快照", "game-meta"));
+    center.append(el("span", g.script_id === "trouble_brewing" ? "暗流涌动" : g.script_id || "等待对局", "eyebrow"), el("h3", timeName(selectedTime)));
+    if (index(g.time) !== selectedTime) center.append(el("span", `历史 · 当前${timeName(index(g.time))}`, "badge"));
     const timeControls = el("div", undefined, "time-controls");
     [["▲", -1, "上一阶段"], ["▼", 1, "下一阶段"]].forEach(([symbol, delta, label]) => {
       const button = el("button", symbol); button.type = "button"; button.dataset.focus = label; button.setAttribute("aria-label", label); button.title = label;
@@ -193,7 +192,6 @@ window.Roundtable = (() => {
       if (activeAssumptions.length) tags.push(hasConfirmed ? "另有假设" : "临时假设");
        const observations = facts.filter((f) => f.type === "botc:ability_observation" && obj(f.data).actor_id === p.id && index(obj(f.data).time) === selectedTime);
        if (observations.length) tags.push(`动作 ${observations.length}`);
-        if (roleDerived && !als.length && !conflict) tags.push(`${defaultOrigin} · 默认阵营`);
        if (tags.length) button.append(el("span", tags.join(" · "), "player-tag"));
        button.addEventListener("click", () => { selectedPlayer = p.id; render(lastRequest, lastResponse); window.PlayerActions.open(lastRequest, p, selectedTime); });
       board.append(button);
@@ -203,19 +201,17 @@ window.Roundtable = (() => {
     const phaseTitle = el("h3", "推进对局"); phaseTitle.id = "phase-title";
     const phase = window.App.phaseState;
     const advance = el("button", phase.label || "next 推进对局", "primary"); advance.type = "button"; advance.dataset.focus = "advance-phase";
-    advance.disabled = phase.disabled; advance.setAttribute("aria-describedby", "phase-target phase-help");
+    advance.disabled = phase.disabled;
     advance.addEventListener("keydown", (event) => { if (event.repeat && ["Enter", " "].includes(event.key)) event.preventDefault(); });
     advance.addEventListener("click", (event) => {
       if (event.detail > 1) return; // 双击不意外跳过一个阶段；键盘 click 的 detail 为 0。
       try { window.App.advancePhase(); } catch (error) { document.getElementById("notice").textContent = error.message; }
     });
-    const target = el("p", phase.hint, "hint"); target.id = "phase-target";
-    const help = el("p", "按真实对局进度推进，不按历史展示时间；不自动推理。", "hint"); help.id = "phase-help";
-    rail.append(phaseTitle, el("p", `实际进度：${timeName(index(g.time))}`, "hint"), advance, target, help);
+    rail.append(phaseTitle, advance);
+    if (phase.disabled) { const target = el("p", phase.hint, "hint"); target.id = "phase-target"; advance.setAttribute("aria-describedby", target.id); rail.append(target); }
     const controlArea = el("div", undefined, "round-controls");
     controlArea.append(timeControls, rail);
     layout.append(viewport, controlArea); root.append(layout);
-     root.append(el("p", "身份 / 阵营假设默认在所有时点共享显示；红唇女郎发生转化时，从该阶段起显示小恶魔，之前保持原假设。确认信息、声明与推理结果仍按原时点显示。假设延续仅用于展示，后台命题仍为单时点条件。左侧三角按钮仅查看历史，不改变实际进度。", "hint time-help"));
     if (!players.length || (!assumptions.some((a) => a.enabled === true) && !players.some((p) => window.AssumptionTimeline.reportedCandidates(r, p.id, window.Roundtable.getSelectedTime()).length) && ![...facts, ...queries].some((f) => index(obj(f.proposition).time) === selectedTime))) root.append(el("p", "当前展示时点暂无条件或查询。可切换其他阶段查看。", "empty time-empty"));
     root.append(window.Reasoning.render(request, response, window.App.reasonState), records(players, assumptions, facts));
     // 重绘不能把窄屏用户刚点击的玩家滚出视野；初次载入居中展示圆心。

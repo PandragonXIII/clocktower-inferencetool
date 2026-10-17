@@ -210,6 +210,37 @@ class SetupPriorTests(unittest.TestCase):
         self.assertAlmostEqual(factor, _info_multiplier(one_night * one_night))
         self.assertNotAlmostEqual(factor, _info_multiplier(one_night) ** 2)
 
+    def test_healthy_pair_info_pays_for_the_decoy_and_which_role(self):
+        world = declare_variables(5, n_nights=1, tag="decoy_factor")
+        solver = world.build_solver()
+        add_game_rules(solver, world, 3, 0, 1, 1)
+        washerwoman = And(
+            world.washerwoman_role[0][Role.EMPATH],
+            world.washerwoman_first[0][1],
+            world.washerwoman_second[0][2],
+        )
+        bag = (Role.WASHERWOMAN, Role.EMPATH, Role.CHEF, Role.POISONER, Role.IMP)
+        factor = _interference_factor(
+            solver,
+            world,
+            bag,
+            beliefs=[(0, Role.WASHERWOMAN)],
+            trusted_claims=[(0, Role.WASHERWOMAN)],
+            soft_abilities=[AbilityObservation(0, Ability.WASHERWOMAN, 1, washerwoman)],
+        )
+        self.assertAlmostEqual(factor, _info_multiplier((5 - 1) * 3))
+        librarian = world.librarian_none[0]
+        none_bag = (Role.LIBRARIAN, Role.CHEF, Role.EMPATH, Role.POISONER, Role.IMP)
+        none_factor = _interference_factor(
+            solver,
+            world,
+            none_bag,
+            beliefs=[(0, Role.LIBRARIAN)],
+            trusted_claims=[(0, Role.LIBRARIAN)],
+            soft_abilities=[AbilityObservation(0, Ability.LIBRARIAN, 1, librarian)],
+        )
+        self.assertEqual(none_factor, 1.0)
+
     def test_red_herring_fraction_is_lower_when_the_yes_is_not_the_demon(self):
         world = declare_variables(5, n_nights=1, tag="red_herring_factor")
         solver = world.build_solver()
@@ -285,7 +316,11 @@ class InputFormatTests(unittest.TestCase):
                 "自认 1 占卜师",
                 "自称 2 洗衣妇",
                 "夜间死亡 2夜 3",
+                "无人死亡 3夜",
+                "夜间死亡 3夜 无",
                 "处决 1天 4",
+                "无人处决 1天",
+                "处决 2天 无",
                 "我发动 1夜 1 占卜师 2 3 否",
                 "自称发动 1夜 2 洗衣妇 厨师 3 4",
                 "自称发动 1天 2 猎手 1",
@@ -298,15 +333,112 @@ class InputFormatTests(unittest.TestCase):
         self.assertEqual(statements[2].mode, "soft_role")
         self.assertTrue(statements[3].mode == "hard" and not statements[3].setup_only)
         self.assertTrue(statements[4].mode == "hard" and not statements[4].setup_only)
-        self.assertEqual(statements[5].mode, "hard")
-        self.assertEqual(statements[5].ability.name, "FORTUNE_TELLER")
-        self.assertEqual(statements[6].mode, "soft_ability")
-        self.assertEqual(statements[7].mode, "hard")
-        self.assertEqual(statements[7].ability.name, "SLAYER")
+        self.assertTrue(statements[5].mode == "hard" and not statements[5].setup_only)
+        self.assertTrue(statements[6].mode == "hard" and not statements[6].setup_only)
+        self.assertTrue(statements[7].mode == "hard" and not statements[7].setup_only)
+        self.assertTrue(statements[8].mode == "hard" and not statements[8].setup_only)
+        self.assertEqual(statements[9].mode, "hard")
+        self.assertEqual(statements[9].ability.name, "FORTUNE_TELLER")
+        self.assertEqual(statements[10].mode, "soft_ability")
+        self.assertEqual(statements[11].mode, "hard")
+        self.assertEqual(statements[11].ability.name, "SLAYER")
 
     def test_bare_activation_is_rejected(self):
         with self.assertRaises(ValueError):
             _parse_fact("发动 1夜 1 厨师 0", 5)
+
+    def test_nobody_died_is_accepted_and_blocks_a_free_night_kill(self):
+        from z3 import Not, sat
+
+        world = declare_variables(5, n_nights=2, tag="nobody_died")
+        solver = world.build_solver()
+        add_game_rules(solver, world, 3, 0, 1, 1)
+        _nights, statements = _parse_facts(["无人死亡 2夜"], 5)
+        solver.add(statements[0].build(world))
+        self.assertEqual(solver.check(), sat)
+
+        killed = declare_variables(5, n_nights=2, tag="must_kill")
+        must = killed.build_solver()
+        add_game_rules(must, killed, 3, 0, 1, 1)
+        roles = [Role.IMP, Role.POISONER, Role.CHEF, Role.EMPATH, Role.FORTUNE_TELLER]
+        for player, role in enumerate(roles):
+            must.add(killed.start_is(player, role))
+            must.add(killed.alive_night_start[2][player])
+        must.add(Not(killed.is_droisoned(0, 2)))
+        for player in killed.player_ids:
+            must.add(Not(killed.night_death[2][player]))
+        self.assertEqual(must.check(), unsat)
+
+        freed = declare_variables(8, n_nights=2, tag="ft_killed_freely")
+        free = freed.build_solver()
+        add_game_rules(free, freed, 5, 1, 1, 1)
+        bag = (
+            Role.CHEF,
+            Role.EMPATH,
+            Role.FORTUNE_TELLER,
+            Role.UNDERTAKER,
+            Role.IMP,
+            Role.SPY,
+            Role.DRUNK,
+            Role.SOLDIER,
+        )
+        for player, role in enumerate(bag):
+            free.add(freed.start_is(player, role))
+        free.add(freed.drunk_mask[Role.WASHERWOMAN])
+        free.add(
+            And(
+                freed.fortune_first[2][2][3],
+                freed.fortune_second[2][2][4],
+                Not(freed.fortune_yes[2][2]),
+            )
+        )
+        self.assertEqual(free.check(), sat)
+        free.add(freed.alive_night_start[2][2])
+        for player in freed.player_ids:
+            free.add(Not(freed.night_death[2][player]))
+        self.assertEqual(free.check(), unsat)
+
+    def test_nobody_executed_is_accepted_and_blocks_a_free_day_execution(self):
+        from z3 import Not, sat
+
+        world = declare_variables(5, n_nights=2, tag="nobody_executed")
+        solver = world.build_solver()
+        add_game_rules(solver, world, 3, 0, 1, 1)
+        _nights, statements = _parse_facts(["无人处决 1天", "处决 1天 无"], 5)
+        solver.add(statements[0].build(world))
+        self.assertEqual(solver.check(), sat)
+        solver.add(world.executed[1][0])
+        self.assertEqual(solver.check(), unsat)
+
+        freed = declare_variables(8, n_nights=2, tag="ft_executed_freely")
+        free = freed.build_solver()
+        add_game_rules(free, freed, 5, 1, 1, 1)
+        bag = (
+            Role.CHEF,
+            Role.EMPATH,
+            Role.FORTUNE_TELLER,
+            Role.UNDERTAKER,
+            Role.IMP,
+            Role.SPY,
+            Role.DRUNK,
+            Role.SOLDIER,
+        )
+        for player, role in enumerate(bag):
+            free.add(freed.start_is(player, role))
+        free.add(freed.drunk_mask[Role.WASHERWOMAN])
+        free.add(
+            And(
+                freed.fortune_first[2][2][3],
+                freed.fortune_second[2][2][4],
+                Not(freed.fortune_yes[2][2]),
+            )
+        )
+        for player in freed.player_ids:
+            free.add(Not(freed.night_death[2][player]))
+        self.assertEqual(free.check(), sat)
+        _nights, statements = _parse_facts(["无人处决 1天"], 8)
+        free.add(statements[0].build(freed))
+        self.assertEqual(free.check(), unsat)
 
     def test_public_death_and_own_token_show_probabilities(self):
         nights, statements = _parse_facts(["我是 1 占卜师", "自称 2 洗衣妇"], 5)

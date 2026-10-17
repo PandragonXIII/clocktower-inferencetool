@@ -438,6 +438,8 @@ def _interference_factor(
     投毒只取消当夜：该夜乘 ``1/入夜存活善良人数``，再乘当夜写法数的 ``1/(1+log2(M))``。
     酒鬼取消他的全部信息：各夜写法数合成一个 ``M``，再乘一次 ``1/(1+log2(M))``。
     红鲱鱼整局只有一名善良玩家：乘上仍能解释全部清醒占卜结果的善良玩家比例。
+    洗衣妇、图书管理员、调查员的信息若清醒属实，陪衬人数与在场该类角色人数
+    先相乘，再取 ``1/(1+log2(...))``。
     """
 
     if solver is None or world is None:
@@ -534,6 +536,7 @@ def _poison_plan_factor(
                 ],
                 len(bag),
             )
+        factor *= _healthy_decoy_factor(bag, matched, poisoned, world)
         factor *= _red_herring_factor(solver, world, bag)
         return factor
     finally:
@@ -588,6 +591,48 @@ def _red_herring_factor(solver: Solver, world: TroubleBrewingVars, bag: tuple[Ro
         finally:
             solver.pop()
     return eligible / len(good)
+
+
+_DECOY_CATEGORIES = {
+    Ability.WASHERWOMAN: TOWNSFOLK,
+    Ability.LIBRARIAN: OUTSIDERS,
+    Ability.INVESTIGATOR: MINIONS,
+}
+
+
+def _healthy_decoy_factor(
+    bag: tuple[Role, ...],
+    matched: Sequence[AbilityObservation],
+    poisoned: set[tuple[int, int]],
+    world: TroubleBrewingVars,
+) -> float:
+    """清醒属实的洗衣妇、图书管理员、调查员：陪衬和展示哪一个在场角色。"""
+
+    n_players = len(bag)
+    if n_players <= 1:
+        return 1.0
+    factor = 1.0
+    for observation in matched:
+        category = _DECOY_CATEGORIES.get(observation.ability)
+        if category is None or bag[observation.actor] is Role.DRUNK:
+            continue
+        if (observation.when, observation.actor) in poisoned or _is_none_report(observation, world):
+            continue
+        choices = max(n_players - 1, 1)
+        present = sum(role in category for role in bag)
+        if present > 0:
+            choices *= present
+        factor *= _info_multiplier(choices)
+    return factor
+
+
+def _is_none_report(observation: AbilityObservation, world: TroubleBrewingVars) -> bool:
+    actor = observation.actor
+    if observation.ability is Ability.LIBRARIAN:
+        return observation.claim.get_id() == world.librarian_none[actor].get_id()
+    if observation.ability is Ability.INVESTIGATOR:
+        return observation.claim.get_id() == world.investigator_none[actor].get_id()
+    return False
 
 
 def _drunk_info_factor(

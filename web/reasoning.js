@@ -22,7 +22,8 @@ window.Reasoning = (() => {
    let currentRequest;
    add.addEventListener("click", () => window.GlobalAssumptions.open(currentRequest));
    bar.append(add, button, status);
-   const help = el("p", "查询当前展示时点的阵营和已记录身份候选；保留已有查询，不枚举所有角色。圆桌的跨时点假设延续及转化显示尚未转换为后台全时段约束，不能视为后台已验证。", "hint"); help.id = "reasoning-help";
+   const help = el("details"); help.id = "reasoning-help";
+   help.append(el("summary", "推理范围"), el("p", "查询当前时点的阵营和身份候选。跨时点延续仅用于卡片显示；停用的动作、死亡、投票记录及未接入的全局假设不参与推理。", "hint"));
   const details = el("div"); details.id = "reasoning-details"; details.hidden = true; details.setAttribute("aria-live", "polite");
    const unsupported = el("p", "", "warning"); unsupported.setAttribute("role", "status"); unsupported.hidden = true;
    root.append(title, bar, help, unsupported, details);
