@@ -78,7 +78,7 @@ window.PlayerActions = (() => {
       try { const t = readTime(); sync.textContent = timeIndex(t) > timeIndex(context.request.game.time) ? `对局进度同步至${timeName(t)}` : "历史记录不会使对局进度后退。"; } catch (e) { sync.textContent = e.message; }
     };
     phase.addEventListener("change", updateTime); number.addEventListener("input", updateTime); updateTime();
-    const choice = ability ? select([["", "请选择一个技能"], ...window.ClocktowerSkills.all.map((s) => [s.id, `${s.name}${s.passive ? " · 被动/触发记录" : ""}`])], "ability-choice") : roleSelect();
+    const choice = ability ? select([["", "请选择一个技能"]], "ability-choice") : roleSelect();
     if (!ability) choice.id = "assumption-role";
     const kindSelect = ability ? undefined : select([["role", "身份 role"], ["alignment", "阵营 alignment"]], "assumption-kind");
     if (kindSelect) field(form, "假设类型", kindSelect);
@@ -88,6 +88,9 @@ window.PlayerActions = (() => {
     if (alignmentWrap) alignmentWrap.hidden = true;
     const preview = el("p", ability ? "请选择后预览身份假设。" : "请选择假设类型与内容后预览。", "round-status"); preview.setAttribute("aria-live", "polite"); form.append(preview);
     const controls = el("div"); form.append(controls);
+    const availabilityHint = el("p", "", "hint"); availabilityHint.setAttribute("role", "status"); if (ability) form.insertBefore(availabilityHint, preview);
+    const unavailable = el("details"); unavailable.append(el("summary", "查看当前不可用技能及原因"));
+    const unavailableList = el("ul"); unavailable.append(unavailableList); if (ability) form.insertBefore(unavailable, preview);
     const note = el("textarea"); note.rows = 3; note.className = "ability-note"; if (ability) field(form, "技能备注（可选）", note);
     const error = el("p", "", "warning"); error.setAttribute("role", "alert"); form.append(error);
     const save = el("button", ability ? "保存动作及身份假设" : "保存假设", "primary"); save.type = "submit"; form.append(save, button("取消（不保存）", () => context.onClose ? close() : home()));
@@ -116,7 +119,7 @@ window.PlayerActions = (() => {
       skill = ability ? window.ClocktowerSkills.all.find((s) => s.id === choice.value) : undefined;
       updatePreview();
       if (!skill) return;
-      controls.append(el("p", `${skill.passive ? "被动/触发记录 · " : ""}通常发生：${skill.timing}。允许记录例外，不在此判断行动规则是否合法。`, "hint"));
+      controls.append(el("p", `${skill.passive ? "被动/触发记录 · " : ""}${window.SkillAvailability.check(skill, readTime()).reason} 触发条件、死亡状态和技能真实性仍需核对。`, "hint"));
       if (skill.help) controls.append(el("p", skill.help, "hint"));
       let branch;
       if (skill.noOutsiders) branch = field(controls, "获知分支", select([["pair", "两人之一为外来者"], ["none", "无外来者"]]));
@@ -130,7 +133,7 @@ window.PlayerActions = (() => {
       const resultBox = el("div"); controls.append(resultBox);
       const m = skill.result; let valueControl, unobserved, extraRole;
       if (m.kind === "role") valueControl = field(resultBox, "获知 / 表象角色", roleSelect(m.roles));
-      if (m.kind === "choice") valueControl = field(resultBox, "观察结果", select([["", "请选择结果"], ...m.options.map((o) => [o.value, o.label])]));
+      if (m.kind === "choice") valueControl = field(resultBox, "观察结果", select([["", "请选择结果"], ...window.SkillAvailability.resultOptions(skill, readTime()).map((o) => [o.value, o.label])]));
       if (m.kind === "number") { valueControl = el("input"); valueControl.type = "number"; valueControl.min = "0"; valueControl.max = String(m.max === "players" ? context.request.game.players.length : m.max); valueControl.step = "1"; field(resultBox, "观察数量", valueControl); }
       if (m.kind === "text") { valueControl = el("textarea"); valueControl.rows = 6; field(resultBox, "完整魔典信息（多行文本）", valueControl); }
       if (["role", "number", "text"].includes(m.kind)) { unobserved = el("input"); unobserved.type = "checkbox"; field(resultBox, "未观察到结果", unobserved); unobserved.addEventListener("change", () => { valueControl.disabled = unobserved.checked; }); }
@@ -148,6 +151,27 @@ window.PlayerActions = (() => {
         return { kind: "choice", value: valueControl.value, ...(extraRole && valueControl.value === "role" ? { role_id: extraRole.value } : {}) };
       };
     });
+    if (ability) {
+      const refreshSkills = () => {
+        const previous = choice.value;
+        let time; try { time = readTime(); } catch { time = undefined; }
+        const available = window.ClocktowerSkills.all.filter((s) => window.SkillAvailability.check(s, time).available);
+        choice.replaceChildren();
+        const placeholder = el("option", available.length ? "请选择一个技能" : "此时点没有可录入技能"); placeholder.value = ""; choice.append(placeholder);
+        available.forEach((s) => { const o = el("option", `${s.name}${s.passive ? " · 被动/触发记录" : ""}`); o.value = s.id; choice.append(o); });
+        choice.disabled = !available.length; save.disabled = !available.length;
+        availabilityHint.textContent = time?.phase === "setup" ? "初始配置阶段不能录入技能。请将记录时点切换到夜晚或白天；身份假设仍可正常添加。" : `当前可选 ${available.length} 项；只筛选明确时间限制，不根据猜测身份、死亡或未记录的触发条件隐藏技能。`;
+        unavailableList.replaceChildren();
+        window.ClocktowerSkills.all.filter((s) => !available.includes(s)).forEach((s) => unavailableList.append(el("li", `${s.name}：${window.SkillAvailability.check(s, time).reason}`)));
+        unavailable.hidden = unavailableList.children.length === 0;
+        const retained = available.some((s) => s.id === previous);
+        choice.value = retained ? previous : "";
+        choice.dispatchEvent(new Event("change"));
+        if (previous) availabilityHint.textContent += retained ? " 时间已变更，请重新选择目标与结果。" : " 原技能不适用于新时点，已清除未保存的选择。";
+        error.textContent = "";
+      };
+      phase.addEventListener("change", refreshSkills); number.addEventListener("input", refreshSkills); refreshSkills();
+    }
     form.addEventListener("submit", (event) => {
       event.preventDefault(); error.textContent = "";
       try {

@@ -39,6 +39,7 @@ window.ClocktowerSkills = (() => {
 
   function validate(skill, data, players) {
     if (!skill) throw new Error("请选择技能。");
+    window.SkillAvailability.assert(skill, data);
     const targets = data.targets;
     if (!Array.isArray(targets) || new Set(targets).size !== targets.length || targets.some((id) => !players.some((p) => p.id === id))) throw new Error("目标必须是本局玩家且不能重复。");
     const empty = skill.noOutsiders && data.result?.kind === "no_outsiders";
