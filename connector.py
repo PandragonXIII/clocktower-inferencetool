@@ -18,14 +18,12 @@ from typing import Any
 
 from z3 import And, BoolRef, Not, Or, Solver, is_true, sat, unknown, unsat
 
-from botc_reasoner import (
-    Role,
-    add_game_rules,
-    declare_variables,
-    minimal_unsatisfiable_subset,
-    role_from_name,
-)
+from botc_reasoner import Role, declare_variables, role_from_name
+from botc_reasoner.analysis import build_solver
+from botc_reasoner.inputs import compile_inputs
+from botc_reasoner.pipeline import analyze
 from botc_reasoner.roles import BASE_SETUP, EVIL_ROLES, GOOD_ROLES, OUTSIDERS, TOWNSFOLK
+from botc_reasoner.rules import collect_game_rules
 from botc_reasoner.variables import Ability, Moment, TroubleBrewingVars
 
 _OBSERVATION = "botc:ability_observation"
@@ -45,7 +43,7 @@ class TroubleBrewingAdapter:
             "api_version": "1.0",
             "supported_fact_types": ["role", "alignment", *_EXTENSIONS],
             "query_types": ["role", "alignment"],
-            "scripts": ["trouble_brewing"],
+            "scripts": [{"id": "trouble_brewing", "name": "暗流涌动"}],
             "extensions": {"adapter:mode": "trouble_brewing"},
         }
 
@@ -56,67 +54,41 @@ class TroubleBrewingAdapter:
 
 def _reason(request: dict[str, Any]) -> dict[str, Any]:
     game = request.get("game") or {}
-    response = {
-        "api_version": "1.0",
-        "request_id": request.get("request_id"),
-        "game_id": game.get("id"),
-        "revision": game.get("revision"),
-        "results": [],
-        "extensions": {"adapter:mode": "trouble_brewing"},
-    }
     try:
-        world, solver, propositions = _prepare(request)
-    except ValueError as error:
-        response["consistency"] = "unknown"
-        response["reason"] = str(error)
-        response["results"] = [
-            {"id": query.get("id"), "status": "unknown", "reason": str(error)}
-            for query in request.get("queries") or []
-            if isinstance(query, dict)
-        ]
-        return response
-
-    timeout = (request.get("options") or {}).get("timeout_ms")
-    if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0:
-        solver.set("timeout", timeout)
-
-    solver.push()
-    for expr, _label in propositions:
-        solver.add(expr)
-    status = solver.check()
-    if status == unknown:
-        response["consistency"] = "unknown"
-        response["reason"] = solver.reason_unknown() or "求解超时"
-        response["results"] = [
-            {"id": query.get("id"), "status": "unknown", "reason": response["reason"]}
-            for query in request.get("queries") or []
-            if isinstance(query, dict)
-        ]
-        return response
-    if status == unsat:
-        solver.pop()
-        labels = minimal_unsatisfiable_subset(solver, propositions)
-        response["consistency"] = "unsat"
-        response["results"] = [
-            {"id": query.get("id"), "status": "inconsistent"}
-            for query in request.get("queries") or []
-            if isinstance(query, dict)
-        ]
-        response["conflicts"] = [{"input_ids": list(labels), "rule_ids": []}]
-        return response
-
-    response["consistency"] = "sat"
-    response["model"] = {"assignments": _setup_model(solver, world, game)}
-    response["extensions"]["trouble_brewing:possible_roles"] = _possible_roles(solver, world, game)
-    response["results"] = [
-        _query_result(solver, world, game, query)
-        for query in request.get("queries") or []
-        if isinstance(query, dict)
-    ]
-    return response
+        world, collector, inputs, seats = _prepare_context(request)
+        return analyze(
+            request,
+            world,
+            collector,
+            inputs,
+            query_expr=lambda proposition: _proposition_expr(
+                proposition, world, seats, claimed=False
+            ),
+            model_assignments=lambda solver: _setup_model(solver, world, game),
+            projection=_projection(world, game),
+        )
+    except (ValueError, KeyError) as error:
+        return {
+            "api_version": "1.0",
+            "request_id": request.get("request_id"),
+            "game_id": game.get("id"),
+            "revision": game.get("revision"),
+            "consistency": "unknown",
+            "reason": str(error),
+            "results": [
+                {"id": query.get("id"), "status": "unknown", "reason": str(error)}
+                for query in request.get("queries") or []
+                if isinstance(query, dict)
+            ],
+            "extensions": {"adapter:mode": "trouble_brewing"},
+        }
 
 
-def _prepare(request: dict[str, Any]) -> tuple[TroubleBrewingVars, Solver, list[tuple[BoolRef, str]]]:
+def _prepare_context(
+    request: dict[str, Any],
+) -> tuple[TroubleBrewingVars, Any, list[Any], dict[str, int]]:
+    """一次建好世界、规则收集器与编译后的输入，供 :func:`analyze` 使用。"""
+
     game = request.get("game") or {}
     if game.get("script_id") not in (None, "", "trouble_brewing"):
         raise ValueError("连接器目前只求解暗流涌动")
@@ -127,10 +99,30 @@ def _prepare(request: dict[str, Any]) -> tuple[TroubleBrewingVars, Solver, list[
     seats = _seats(players)
     nights = _horizon(request)
     world = declare_variables(count, n_nights=nights, tag="web")
-    solver = world.build_solver()
-    add_game_rules(solver, world, *BASE_SETUP[count])
-    propositions = _propositions(request, world, seats)
+    collector = collect_game_rules(world, *BASE_SETUP[count])
+    inputs = compile_inputs(request, world, seats, _fact_expr, _proposition_expr)
+    return world, collector, inputs, seats
+
+
+def _prepare(request: dict[str, Any]) -> tuple[TroubleBrewingVars, Solver, list[tuple[BoolRef, str]]]:
+    """旧测试用接口：在 :func:`_prepare_context` 之上装规则与域公理，不装输入。"""
+
+    world, collector, inputs, _seats_map = _prepare_context(request)
+    solver = build_solver(list(world.encoding_axioms()), collector.records)
+    propositions = [(item.expr, item.id) for item in inputs]
     return world, solver, propositions
+
+
+def _projection(world: TroubleBrewingVars, game: dict[str, Any]) -> list[tuple[str, list[tuple[str, BoolRef]]]]:
+    """初始投影：每位玩家在每个 :class:`Role` 上的 ``start_is``。"""
+
+    return [
+        (
+            player["id"],
+            [(role.value, world.start_is(player["seat"] - 1, role)) for role in Role],
+        )
+        for player in game.get("players") or []
+    ]
 
 
 def _seats(players: list[dict[str, Any]]) -> dict[str, int]:
@@ -152,6 +144,8 @@ def _horizon(request: dict[str, Any]) -> int:
     for collection in ("facts", "assumptions", "queries"):
         for item in request.get(collection) or []:
             if not isinstance(item, dict):
+                continue
+            if collection != "queries" and item.get("enabled", True) is False:
                 continue
             proposition = item.get("proposition") or {}
             times.append(proposition.get("time") if isinstance(proposition, dict) else None)
@@ -191,12 +185,10 @@ def _fact_expr(
     world: TroubleBrewingVars,
     seats: dict[str, int],
 ) -> BoolRef | None:
-    fact_type = fact.get("type")
-    enabled = fact.get("enabled", True) is not False
-    if fact_type in _EXTENSIONS:
-        return _extension_expr(fact, world, seats)
-    if not enabled:
+    if fact.get("enabled", True) is False:
         return None
+    if fact.get("type") in _EXTENSIONS:
+        return _extension_expr(fact, world, seats)
     return _proposition_expr(
         fact.get("proposition"),
         world,
@@ -425,6 +417,12 @@ def _setup_model(solver: Solver, world: TroubleBrewingVars, game: dict[str, Any]
 
 
 def _possible_roles(solver: Solver, world: TroubleBrewingVars, game: dict[str, Any]) -> list[dict[str, Any]]:
+    """旧单轨路径的候选角色枚举，**已不再被 :func:`_reason` 调用**。
+
+    新管道经 :func:`botc_reasoner.pipeline.analyze` 的 ``reasoner:role_ranges`` 输出候选，
+    本函数仅保留供旧调用方/测试使用，不代表当前实现的语义。
+    """
+
     rows = []
     for player in game.get("players") or []:
         index = player["seat"] - 1

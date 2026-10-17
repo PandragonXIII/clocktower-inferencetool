@@ -18,12 +18,21 @@ window.Reasoning = (() => {
   const button = el("button", "开始推理", "primary"); button.id = "send"; button.type = "button"; button.dataset.focus = "reason"; button.setAttribute("aria-describedby", "reasoning-help"); button.setAttribute("aria-controls", "reasoning-details");
   button.addEventListener("click", () => window.App.reason());
   const status = el("p", ""); status.id = "reasoning-status"; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite"); status.setAttribute("aria-atomic", "true");
-  bar.append(button, status);
-  const help = el("p", "查询当前展示时点的阵营和已记录身份候选；保留已有查询，不枚举所有角色。", "hint"); help.id = "reasoning-help";
+   const add = el("button", "新增假设"); add.id = "add-global-assumption"; add.type = "button"; add.dataset.focus = "global-assumption"; add.setAttribute("aria-haspopup", "dialog");
+   let currentRequest;
+   add.addEventListener("click", () => window.GlobalAssumptions.open(currentRequest));
+   bar.append(add, button, status);
+   const help = el("p", "查询当前展示时点的阵营和已记录身份候选；保留已有查询，不枚举所有角色。圆桌的跨时点假设延续及转化显示尚未转换为后台全时段约束，不能视为后台已验证。", "hint"); help.id = "reasoning-help";
   const details = el("div"); details.id = "reasoning-details"; details.hidden = true; details.setAttribute("aria-live", "polite");
-  root.append(title, bar, help, details);
+   const unsupported = el("p", "", "warning"); unsupported.setAttribute("role", "status"); unsupported.hidden = true;
+   root.append(title, bar, help, unsupported, details);
   let previousResponse, previousRequest, previousError;
-  function render(request, response, state) {
+   function render(request, response, state) {
+     currentRequest = request;
+     add.disabled = !request?.game;
+     const globalCount = arr(request?.facts).filter((f) => f.type === "botc:global_assumption" && f.data?.requested_enabled === true).length;
+     unsupported.hidden = !globalCount;
+     unsupported.textContent = globalCount ? `${globalCount} 条全局假设待后台接入，尚未参与推理；以下结论不包含这些条件。` : "";
     const { busy, pending, error } = state;
     button.disabled = busy; button.textContent = busy ? "推理中…" : "开始推理";
     button.setAttribute("aria-busy", String(busy));
@@ -72,7 +81,8 @@ window.Reasoning = (() => {
       });
       details.append(el("h4", "恒为真结论"), el("p", "下面只列出在当前已启用假设下必然成立的阵营或身份。", "hint"));
       const conclusions = arr(request.queries).filter((q) => arr(request.queries).filter((v) => v.id === q.id).length === 1 && arr(response.results).filter((v) => v.id === q.id).length === 1 && response.results.find((v) => v.id === q.id).status === "necessary");
-      if (!conclusions.length) details.append(el("p", "没有必然成立的阵营或身份。"));
+       if (!conclusions.length) details.append(el("p", "后台未在本次查询中返回必然结论，不代表不存在其他必然结论。"));
+       details.append(el("p", "结论基于当前启用的条件输入，包括 reported 声明；它们不是无条件事实。", "hint"));
       conclusions.forEach((q) => { const card = el("article", undefined, "evidence"); card.append(el("p", describe(q.proposition, request))); details.append(card); });
     }
     return root;

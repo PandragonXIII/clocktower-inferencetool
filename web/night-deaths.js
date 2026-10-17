@@ -25,7 +25,7 @@ window.NightDeaths = (() => {
     document.querySelector('[data-focus="advance-phase"]')?.focus({ preventScroll: true });
   }
   function sync(expected) { if (context !== undefined && context !== expected) close(); }
-  function open(request, expected) {
+  function open(request, expected, editEntry) {
     if (dialog?.open || saving) return;
     window.PlayerActions.close();
     if (!dialog) {
@@ -35,28 +35,31 @@ window.NightDeaths = (() => {
       document.body.append(dialog);
     }
     context = expected; dialog.replaceChildren();
-    const heading = el("h2", `第 ${request.game.time.number} 夜死亡`); heading.id = "night-deaths-title";
+    const time = editEntry ? editEntry.data.time : request.game.time;
+    const heading = el("h2", `${editEntry ? "修改 · " : ""}第 ${time.number} 夜死亡`); heading.id = "night-deaths-title";
     const cancel = el("button", "取消（不推进）"); cancel.type = "button"; cancel.addEventListener("click", close);
     const header = el("div", undefined, "section-head"); header.append(heading, cancel);
-    const help = el("p", "请选择昨晚死亡的玩家（可多选），或明确勾选“无人死亡”。确认后才进入白天；死亡已记录，尚未参与推理。", "hint"); help.id = "night-deaths-help";
+    const help = el("p", editEntry ? "修改后不推进时间。历史死亡变更可能影响后续提名、投票阈值或死亡记录，请复核后续记录；不会自动重写处决结果。" : "请选择昨晚死亡的玩家（可多选），或明确勾选“无人死亡”。确认后才进入白天；死亡已记录，尚未参与推理。", "hint"); help.id = "night-deaths-help";
     const form = el("form"), group = el("fieldset"); group.append(el("legend", "昨晚死亡的玩家"));
-    const dead = deadAt(request.facts, request.game.time), checks = [];
+    const dead = deadAt(request.facts.filter((f) => f.id !== editEntry?.id), time), checks = [];
     [...request.game.players].sort((a, b) => a.seat - b.seat).forEach((p) => {
       const check = el("input"); check.type = "checkbox"; check.name = "night-death-player"; check.value = p.id; check.disabled = dead.has(p.id);
+      check.checked = !check.disabled && (editEntry?.data.player_ids || []).includes(p.id);
       const label = el("label", undefined, "target-option"); label.append(check, el("span", `${p.seat} 号 · ${p.name || p.id}${check.disabled ? " · 已死亡" : ""}`)); group.append(label); checks.push(check);
     });
     const none = el("input"); none.type = "checkbox"; none.id = "night-deaths-none";
+    none.checked = editEntry?.data.result === "none";
     const noneLabel = el("label", undefined, "target-option"); noneLabel.append(none, el("span", "无人死亡（明确确认）"));
     const error = el("p", "", "warning"); error.setAttribute("role", "alert");
-    const save = el("button", "确认记录并进入白天", "primary"); save.type = "submit"; save.disabled = true;
+    const save = el("button", editEntry ? "保存修改" : "确认记录并进入白天", "primary"); save.type = "submit"; save.disabled = true;
     const update = () => { save.disabled = saving || (!none.checked && !checks.some((c) => c.checked)); };
     checks.forEach((c) => c.addEventListener("change", () => { if (c.checked) none.checked = false; update(); }));
     none.addEventListener("change", () => { if (none.checked) checks.forEach((c) => { c.checked = false; }); update(); });
-    form.append(group, noneLabel, error, save); dialog.append(header, help, form);
+    form.append(group, noneLabel, error, save); dialog.append(header, help, form); update();
     form.addEventListener("submit", (e) => {
       e.preventDefault(); if (saving || context !== expected || save.disabled) return;
       saving = true; update();
-      try { window.App.confirmNightDeaths(expected, checks.filter((c) => c.checked).map((c) => c.value), none.checked ? "none" : "deaths"); close(); }
+      try { const ids = checks.filter((c) => c.checked).map((c) => c.value), result = none.checked ? "none" : "deaths"; if (editEntry) window.App.editNightDeaths(editEntry.id, ids, result, request.request_id); else window.App.confirmNightDeaths(expected, ids, result); close(); }
       catch (err) { error.textContent = err.message; }
       finally { saving = false; update(); }
     });

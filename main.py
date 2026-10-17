@@ -2,8 +2,8 @@
 
 Commands:
     python main.py test   Run the unit test suite (default when no command given).
-    python main.py demo   Run a small reasoning engine interface demo.
-    python main.py web    Serve the web UI and the placeholder reasoning API.
+    python main.py demo   Run a small botc_reasoner reasoning demo.
+    python main.py web    Serve the web UI and the real reasoning API.
 """
 
 import argparse
@@ -26,14 +26,35 @@ def run_tests() -> int:
 
 
 def run_demo() -> int:
-    from z3 import Bool, Or
+    from z3 import Not, sat, unsat
 
-    from engine import ReasoningEngine
+    from botc_reasoner import Role, add_game_rules, declare_variables
+    from botc_reasoner.roles import BASE_SETUP
 
-    demon = Bool("player_is_demon")
-    engine = ReasoningEngine()
-    engine.add_constraint(Or(demon, ~demon), label="valid_state")
-    print(engine.query(demon))
+    def status(solver) -> str:
+        result = solver.check()
+        if result == sat:
+            return "sat"
+        if result == unsat:
+            return "unsat"
+        return "unknown"
+
+    world = declare_variables(5, n_nights=1)
+    solver = world.build_solver()
+    add_game_rules(solver, world, *BASE_SETUP[5])
+
+    print("5 人局，1 夜，装载暗流涌动规则")
+    print(f"基础一致性：{status(solver)}")
+
+    solver.push()
+    solver.add(world.start_is(0, Role.IMP))
+    print(f"玩家 0 是小恶魔（正命题）：{status(solver)}")
+    solver.pop()
+
+    solver.push()
+    solver.add(Not(world.start_is(0, Role.IMP)))
+    print(f"玩家 0 是小恶魔（反命题）：{status(solver)}")
+    solver.pop()
     return 0
 
 
@@ -49,13 +70,14 @@ def _valid_port(value: str) -> int:
 
 def run_web(host: str, port: int) -> int:
     from backend.http_server import create_server
+    from connector import TroubleBrewingAdapter
 
     try:
-        httpd = create_server(host, port)
+        httpd = create_server(host, port, adapter=TroubleBrewingAdapter())
     except OSError as exc:
         print(f"error: cannot start web server on {host}:{port}: {exc}", file=sys.stderr)
         return 1
-    print(f"Serving UI and placeholder API at http://{host}:{port}/ (Ctrl+C to stop)")
+    print(f"Serving UI and reasoning API at http://{host}:{port}/ (Ctrl+C to stop)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -72,8 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("test", help="run the unit test suite (default)")
-    subparsers.add_parser("demo", help="run the reasoning engine demo")
-    web = subparsers.add_parser("web", help="serve the web UI and placeholder reasoning API")
+    subparsers.add_parser("demo", help="run the botc_reasoner reasoning demo")
+    web = subparsers.add_parser("web", help="serve the web UI and real reasoning API")
     web.add_argument("--host", default=DEFAULT_HOST, help="bind host (default: 127.0.0.1)")
     web.add_argument(
         "--port",
