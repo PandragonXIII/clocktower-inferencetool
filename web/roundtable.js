@@ -37,6 +37,7 @@ window.Roundtable = (() => {
       const p = obj(a.proposition), enabled = a.enabled === true, time = timeName(index(p.time));
       const name = value(p) === undefined ? "其他命题假设" : `${valueName(p.kind, value(p))} ?`;
       const card = el("article", undefined, "evidence record-card"); card.dataset.assumption = a.id;
+      card.classList.add("record-assumption"); card.append(el("span", "假设", "record-type"));
       const head = el("div", undefined, "record-head"), copy = el("div", undefined, "record-copy");
       copy.append(el("h5", `${name}${p.kind === "alignment" ? " · 阵营假设" : ""}`), el("p", `${playerName(p.player_id)} ｜ ${time}`));
       const observationId = obj(a.extensions)["ui:observation_id"];
@@ -56,6 +57,7 @@ window.Roundtable = (() => {
     actions.forEach((f) => {
       const data = obj(f.data), result = obj(data.result), skill = window.ClocktowerSkills.all.find((s) => s.id === data.ability_id);
       const card = el("article", undefined, "evidence record-card"); card.dataset.observation = f.id;
+      card.classList.add("record-action"); card.append(el("span", "技能动作", "record-type"));
       card.append(el("h5", skill?.name || `${data.ability_id || "未知技能"}（${roles[data.role_id] || data.role_id || "未知角色"}）`), el("p", `${playerName(data.actor_id)} ｜ ${timeName(index(data.time))}`));
       if (arr(data.targets).length) card.append(el("p", `目标：${arr(data.targets).map(playerName).join("、")}`));
       let resultText;
@@ -80,6 +82,7 @@ window.Roundtable = (() => {
     if (!deaths.length) deathList.append(el("p", "暂无死亡记录。夜晚进入下一天时确认。", "empty"));
     deaths.forEach((f) => {
       const d = obj(f.data), card = el("article", undefined, "evidence record-card"); card.dataset.death = f.id;
+      card.classList.add("record-death"); card.append(el("span", "死亡记录", "record-type"));
       card.append(el("h5", `${timeName(index(d.time))}死亡`), el("p", d.result === "none" ? "无人死亡" : arr(d.player_ids).map(playerName).join("、") || "未提供"));
       remove(card, "编辑死亡记录", () => window.NightDeaths.open(lastRequest, window.App.votingContext, f), `edit-${f.id}`);
       raw(card, f); deathList.append(card);
@@ -89,6 +92,7 @@ window.Roundtable = (() => {
     const voteList = el("div", undefined, "record-list"); section.append(voteList);
     votes.forEach((f) => {
       const d = obj(f.data), card = el("article", undefined, "evidence record-card"); card.dataset.vote = f.id;
+      card.classList.add("record-vote"); card.append(el("span", "提名投票", "record-type"));
       card.append(el("h5", `${timeName(index(d.time))} · ${d.stage === "settled" ? "已结算" : "投票中"}`));
       arr(d.nominations).forEach((n, i) => card.append(el("p", `第 ${i + 1} 轮：${playerName(n.nominator_id)} → ${playerName(n.nominee_id)} · ${arr(n.voter_ids).length} 票`), el("p", `投票者：${arr(n.voter_ids).map(playerName).join("、") || "无"}`)));
       card.append(el("p", `${d.stage === "settled" ? "结算" : "进入投票时"}存活 ${d.alive_count} 人 · 阈值 ${d.threshold} 票`), el("p", d.stage === "settled" ? `处决：${d.execution?.player_id ? playerName(d.execution.player_id) : "无人"} · 默认：${d.default_player_id ? playerName(d.default_player_id) : "无人"}${d.override ? " · 已手动覆盖" : ""}` : "尚未结算，人数与阈值将在结算时重新计算"), el("p", "投票与处决仅记录，尚未参与推理", "warning"));
@@ -100,11 +104,10 @@ window.Roundtable = (() => {
   function render(request, response, viewTime) {
     lastRequest = request; lastResponse = response;
     const r = obj(request), g = obj(r.game), s = obj(response);
-    const root = document.getElementById("roundtable");
-    const oldViewport = root.querySelector(".table-viewport");
-    const oldScroll = oldViewport?.scrollLeft;
-    const focusKey = root.contains(document.activeElement) ? document.activeElement.dataset.focus : undefined;
-    root.replaceChildren();
+    const liveRoot = document.getElementById("roundtable");
+    const focusKey = liveRoot.contains(document.activeElement) ? document.activeElement.dataset.focus : undefined;
+    // 离线构建后一次替换，避免标签测量强制布局时旧内容已清空，导致页面高度骤减并夹紧滚动位置。
+    const root = document.createDocumentFragment();
     const facts = arr(r.facts).map(obj), assumptions = arr(r.assumptions).map(obj), queries = arr(r.queries).map(obj);
     const players = arr(g.players).map(obj).sort((a, b) => Number(a.seat) - Number(b.seat));
     // 只在新对局重置；短暂加载/解析失败不丢失用户选定时点。
@@ -114,6 +117,7 @@ window.Roundtable = (() => {
      const maxTime = Math.min(198, Math.max(...times));
     if (g.id !== undefined) selectedTime = Math.min(selectedTime, maxTime);
     const dead = window.NightDeaths.deadAt(facts, selectedTime === 0 ? { phase: "setup" } : { phase: selectedTime % 2 ? "night" : "day", number: Math.ceil(selectedTime / 2) });
+    const deathsNow = window.NightDeaths.deathsAt(facts, selectedTime === 0 ? { phase: "setup" } : { phase: selectedTime % 2 ? "night" : "day", number: Math.ceil(selectedTime / 2) });
     const matched = typeof r.request_id === "string" && typeof g.id === "string" && Number.isInteger(g.revision) && s.request_id === r.request_id && s.game_id === g.id && s.revision === g.revision;
     const placeholder = obj(s.extensions)["adapter:mode"] === "placeholder";
     const validResponse = matched && s.api_version === "1.0" && Array.isArray(s.results) && s.results.every((v) => typeof obj(v).id === "string" && Object.hasOwn(states, obj(v).status));
@@ -127,14 +131,19 @@ window.Roundtable = (() => {
     const legend = el("div", undefined, "legend");
     [["unknown", "? 无身份候选"], ["good", "纯色蓝：确定善良"], ["evil", "纯色红：确定邪恶"], ["pending", "斜纹：阵营待确认"]].forEach(([cls, label]) => legend.append(el("span", label, `legend-${cls}`)));
     root.append(legend);
-    const viewport = el("div", undefined, "table-viewport"); viewport.tabIndex = 0; viewport.setAttribute("aria-label", "玩家圆桌，窄屏可横向滚动");
+    const viewport = el("div", undefined, "table-viewport"); viewport.tabIndex = 0; viewport.setAttribute("aria-label", "玩家圆桌，可缩放和平移");
     const board = el("div", undefined, "round-board");
     // 固定可读卡片尺寸，人数越多增加圆半径；窄屏仅圆桌内部滚动。
-    const radius = Math.max(210, players.length * 30), size = radius * 2 + 160;
+    const radius = Math.max(210, players.length * 30);
+    const size = radius * 2 + 480;
     board.style.width = `${size}px`; board.style.height = `${size}px`; board.style.setProperty("--orbit", `${radius * 2}px`);
     const center = el("div", undefined, "table-center");
-    center.append(el("span", g.script_id === "trouble_brewing" ? "暗流涌动" : g.script_id || "等待对局", "eyebrow"), el("h3", timeName(selectedTime)));
-    if (index(g.time) !== selectedTime) center.append(el("span", `历史 · 当前${timeName(index(g.time))}`, "badge"));
+    const phaseClass = selectedTime === 0 ? "setup" : selectedTime % 2 ? "night" : "day";
+    const phaseTitleText = el("h3", undefined, `phase-badge phase-${phaseClass}`);
+    const phaseIcon = el("span", phaseClass === "night" ? "☾" : phaseClass === "day" ? "☀" : "◇"); phaseIcon.setAttribute("aria-hidden", "true");
+    phaseTitleText.append(phaseIcon, document.createTextNode(` ${timeName(selectedTime)}`));
+    center.append(el("span", g.script_id === "trouble_brewing" ? "暗流涌动" : g.script_id || "等待对局", "eyebrow"), phaseTitleText);
+    if (index(g.time) !== selectedTime) center.append(el("span", `历史 · 当前${timeName(index(g.time))}`, "badge phase-history"));
     const timeControls = el("div", undefined, "time-controls");
     [["▲", -1, "上一阶段"], ["▼", 1, "下一阶段"]].forEach(([symbol, delta, label]) => {
       const button = el("button", symbol); button.type = "button"; button.dataset.focus = label; button.setAttribute("aria-label", label); button.title = label;
@@ -192,10 +201,21 @@ window.Roundtable = (() => {
       if (activeAssumptions.length) tags.push(hasConfirmed ? "另有假设" : "临时假设");
        const observations = facts.filter((f) => f.type === "botc:ability_observation" && obj(f.data).actor_id === p.id && index(obj(f.data).time) === selectedTime);
        if (observations.length) tags.push(`动作 ${observations.length}`);
-       if (tags.length) button.append(el("span", tags.join(" · "), "player-tag"));
+        if (tags.length) button.append(el("span", tags.join(" · "), "player-tag"));
+        if (deathsNow.has(p.id)) {
+          const kind = deathsNow.get(p.id), label = kind === "night" ? "本阶段夜间死亡" : kind === "execution" ? "本阶段被投票处决" : "本阶段特殊死亡";
+          const stamp = el("span", undefined, `death-stamp death-stamp-${kind}`); stamp.title = label; stamp.setAttribute("aria-hidden", "true");
+          const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("viewBox", "0 0 32 32"); svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "2"); svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
+          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          path.setAttribute("d", kind === "night" ? "M7 24 22 9 27 4C28 11 24 16 17 19L11 25M6 21l5 5M4 28l5-5" : kind === "execution" ? "M17 2v9M13 6h8M13 9h8M16 12C12 16 8 20 9 24c1 7 14 7 15 0 1-4-3-8-7-12ZM13 3h8" : "M9 22C1 14 7 4 16 4s15 10 7 18v6H9ZM11 14h1m8 0h1M14 20l2-3 2 3M13 25v3m6-3v3");
+          svg.append(path); stamp.append(svg); button.append(stamp);
+          button.title += `；${label}`; button.setAttribute("aria-label", button.title);
+        }
        button.addEventListener("click", () => { selectedPlayer = p.id; render(lastRequest, lastResponse); window.PlayerActions.open(lastRequest, p, selectedTime); });
       board.append(button);
-    }); viewport.append(board);
+    });
+    window.ActionVisuals.render(board, facts, selectedTime, players, size, radius);
+    viewport.append(board);
     const layout = el("div", undefined, "round-layout"), rail = el("section", undefined, "phase-controls");
     rail.setAttribute("aria-labelledby", "phase-title");
     const phaseTitle = el("h3", "推进对局"); phaseTitle.id = "phase-title";
@@ -210,13 +230,13 @@ window.Roundtable = (() => {
     rail.append(phaseTitle, advance);
     if (phase.disabled) { const target = el("p", phase.hint, "hint"); target.id = "phase-target"; advance.setAttribute("aria-describedby", target.id); rail.append(target); }
     const controlArea = el("div", undefined, "round-controls");
-    controlArea.append(timeControls, rail);
+    controlArea.append(timeControls);
     layout.append(viewport, controlArea); root.append(layout);
     if (!players.length || (!assumptions.some((a) => a.enabled === true) && !players.some((p) => window.AssumptionTimeline.reportedCandidates(r, p.id, window.Roundtable.getSelectedTime()).length) && ![...facts, ...queries].some((f) => index(obj(f.proposition).time) === selectedTime))) root.append(el("p", "当前展示时点暂无条件或查询。可切换其他阶段查看。", "empty time-empty"));
-    root.append(window.Reasoning.render(request, response, window.App.reasonState), records(players, assumptions, facts));
-    // 重绘不能把窄屏用户刚点击的玩家滚出视野；初次载入居中展示圆心。
-    viewport.scrollLeft = oldScroll ?? Math.max(0, (size - viewport.clientWidth) / 2);
-    if (focusKey) [...root.querySelectorAll("[data-focus]")].find((n) => n.dataset.focus === focusKey)?.focus({ preventScroll: true });
+    root.append(window.Reasoning.render(request, response, window.App.reasonState, rail), records(players, assumptions, facts));
+    liveRoot.replaceChildren(root);
+    window.TableCamera.mount(viewport, board, controlArea, g.id, size);
+    if (focusKey) [...liveRoot.querySelectorAll("[data-focus]")].find((n) => n.dataset.focus === focusKey)?.focus({ preventScroll: true });
   }
    return { render, getSelectedTime() { return selectedTime === 0 ? { phase: "setup" } : { phase: selectedTime % 2 ? "night" : "day", number: Math.ceil(selectedTime / 2) }; }, selectTime(time) { selectedTime = time; render(lastRequest, lastResponse); } };
 })();

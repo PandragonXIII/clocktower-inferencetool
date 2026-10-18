@@ -30,7 +30,22 @@ window.PlayerActions = (() => {
     header.append(heading, button("关闭", close)); body = el("div"); dialog.append(header, body); document.body.append(dialog);
     dialog.addEventListener("cancel", (event) => { event.preventDefault(); close(); });
   }
-  function title() { const p = context.actor; heading.textContent = `${p.seat} 号 · ${p.name || p.id} ｜ ${timeName(context.time)}`; }
+   function title() {
+     const p = context.actor; heading.replaceChildren(el("span", `${p.seat} 号 · `));
+     const name = el("input", undefined, "player-name-input"); name.type = "text"; name.value = p.name || p.id; name.maxLength = 80; name.setAttribute("aria-label", "玩家姓名");
+     const error = el("span", "", "warning"); error.setAttribute("role", "alert");
+     name.addEventListener("change", () => {
+       try {
+         const rename = () => window.App.renamePlayer(p.id, name.value, context.request.game.id);
+         const request = context.onClose ? window.DayVoting.perform(rename) : rename();
+         context.request = request; p.name = request.game.players.find((v) => v.id === p.id).name;
+         if (context.onClose) context.expected = window.App.votingContext;
+         name.value = p.name; error.textContent = "";
+       } catch (e) { error.textContent = e.message; name.value = p.name || p.id; }
+     });
+     name.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); name.blur(); } });
+     heading.append(name, el("span", ` ｜ ${timeName(context.time)}`), error);
+   }
   function home(focus = true) {
     body.replaceChildren(); title();
     const actions = el("div", undefined, "action-choices"); actions.append(button("假设 · 假设身份", () => editor(false), true), button("动作 · 记录观察", () => editor(true), true)); body.append(actions);
@@ -125,7 +140,7 @@ window.PlayerActions = (() => {
       let branch;
       if (skill.noOutsiders) branch = field(controls, "获知分支", select([["pair", "两人之一为外来者"], ["none", "无外来者"]]));
       const targetBox = el("fieldset"); targetBox.append(el("legend", `${skill.targetLabel || (skill.indicated ? "说书人指示 / 获知对象（不是主动选择）" : "目标 / 有关玩家")}：${skill.min}–${skill.max} 人${skill.notSelf ? "，不能自己" : ""}`));
-      if (skill.max > 0) {
+       if (skill.max > 0 && !skill.allPlayers) {
         context.request.game.players.forEach((p) => {
           const check = el("input"); check.type = "checkbox"; check.value = p.id; check.name = "ability-target"; check.disabled = skill.notSelf && p.id === context.actor.id;
           const label = el("label", undefined, "target-option"); label.append(check, el("span", `${p.seat} 号 · ${p.name}`)); targetBox.append(label); targets.push(check);
@@ -179,7 +194,7 @@ window.PlayerActions = (() => {
         const time = readTime(); let request;
         if (ability) {
           if (!skill) throw new Error("请选择技能。");
-          const data = { actor_id: context.actor.id, role_id: skill.role_id, ability_id: skill.id, time, targets: targets.filter((c) => c.checked).map((c) => c.value), result: resultRead(), note: note.value };
+           const data = { actor_id: context.actor.id, role_id: skill.role_id, ability_id: skill.id, time, targets: skill.allPlayers ? context.request.game.players.map((p) => p.id) : targets.filter((c) => c.checked).map((c) => c.value), result: resultRead(), note: note.value };
           window.ClocktowerSkills.validate(skill, data, context.request.game.players);
           request = context.editId ? window.App.editAbility(context.editId, data, context.request.request_id) : context.onClose ? window.DayVoting.perform(() => window.App.recordAbility(data, context.expected)) : window.App.recordAbility(data);
         } else if (kindSelect.value === "alignment") {
@@ -189,7 +204,7 @@ window.PlayerActions = (() => {
           request = context.editId ? window.App.editIdentity(context.editId, { kind: "role", player_id: context.actor.id, role_id: choice.value, time }, context.request.request_id) : window.App.addAssumption(context.actor.id, choice.value, time);
         }
         if (context.onComplete) { const complete = context.onComplete; context.onClose = undefined; close(); complete(request); return; }
-        context.request = request; context.time = time; delete context.editId; delete context.editEntry; window.Roundtable.selectTime(timeIndex(time)); home();
+         window.Roundtable.selectTime(timeIndex(time)); close();
       } catch (e) { error.textContent = e.message; error.tabIndex = -1; error.focus(); }
     });
     if (context.editEntry) {

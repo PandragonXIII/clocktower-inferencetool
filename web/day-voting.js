@@ -60,6 +60,7 @@ window.DayVoting = (() => {
     });
     const error = el("p", "", "warning"); error.setAttribute("role", "alert"); dialog.append(error);
     if (settled) {
+      dialog.append(button("返回提名与投票", () => { perform(() => window.App.reopenVoting(context)); render(); }));
       dialog.append(el("p", `已确认处决：${name(d.execution?.player_id)}${d.override ? "（手动覆盖默认）" : "（采用默认）"}。仍处于白天。`, "round-status"), el("h3", "是否还有其他技能发动？"), el("p", "可反复记录技能；默认没有新增技能，不要求必须录入。保存或取消后返回此页。", "hint"));
       const actor = select("发动玩家（含死者）", "vote-actor", dead);
       dialog.append(button("记录技能", () => {

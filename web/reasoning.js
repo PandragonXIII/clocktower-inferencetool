@@ -22,13 +22,18 @@ window.Reasoning = (() => {
    let currentRequest;
    add.addEventListener("click", () => window.GlobalAssumptions.open(currentRequest));
    bar.append(add, button, status);
-   const help = el("details"); help.id = "reasoning-help";
-   help.append(el("summary", "推理范围"), el("p", "查询当前时点的阵营和身份候选。跨时点延续仅用于卡片显示；停用的动作、死亡、投票记录及未接入的全局假设不参与推理。", "hint"));
+    const help = el("div", undefined, "reasoning-help");
+    const helpIcon = el("button", "?", "reasoning-help-icon"); helpIcon.type = "button"; helpIcon.setAttribute("aria-label", "推理范围说明"); helpIcon.setAttribute("aria-describedby", "reasoning-help");
+    const helpText = el("p", "查询当前时点的阵营和身份候选。跨时点延续仅用于卡片显示；停用的动作、死亡、投票记录及未接入的全局假设不参与推理。", "reasoning-tooltip"); helpText.id = "reasoning-help"; helpText.setAttribute("role", "tooltip");
+    help.append(helpIcon, helpText);
   const details = el("div"); details.id = "reasoning-details"; details.hidden = true; details.setAttribute("aria-live", "polite");
    const unsupported = el("p", "", "warning"); unsupported.setAttribute("role", "status"); unsupported.hidden = true;
-   root.append(title, bar, help, unsupported, details);
+    const columns = el("div", undefined, "reasoning-columns"), left = el("div", undefined, "reasoning-main"), right = el("div", undefined, "reasoning-phase");
+    left.append(title, bar, help); columns.append(left, right);
+    root.append(columns, unsupported, details);
   let previousResponse, previousRequest, previousError;
-   function render(request, response, state) {
+    function render(request, response, state, phaseControls) {
+      if (phaseControls) right.replaceChildren(phaseControls);
      currentRequest = request;
      add.disabled = !request?.game;
      const globalCount = arr(request?.facts).filter((f) => f.type === "botc:global_assumption" && f.data?.requested_enabled === true).length;
