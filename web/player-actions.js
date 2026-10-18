@@ -48,6 +48,7 @@ window.PlayerActions = (() => {
    }
   function home(focus = true) {
     body.replaceChildren(); title();
+    if (context.probabilities?.length) body.append(window.ProbabilityView.panel(context.probabilities));
     const actions = el("div", undefined, "action-choices"); actions.append(button("假设 · 假设身份", () => editor(false), true), button("动作 · 记录观察", () => editor(true), true)); body.append(actions);
     body.append(el("p", "圆桌下方“假设与动作”汇总整局全部时点记录。此处管理该玩家的假设和动作；既有条件、声明与查询可在“高级数据 / 调试”查看。", "hint"));
     const { request, actor } = context;
@@ -228,8 +229,8 @@ window.PlayerActions = (() => {
     }
     (kindSelect || choice).focus();
   }
-  function open(request, actor, selectedTime) {
-    init(); context = { request: structuredClone(request), actor, time: timeFrom(selectedTime) }; opener = actor.id; home(false); dialog.showModal(); body.querySelector("button")?.focus();
+  function open(request, actor, selectedTime, probabilities) {
+    init(); context = { request: structuredClone(request), actor, time: timeFrom(selectedTime), probabilities }; opener = actor.id; home(false); dialog.showModal(); body.querySelector("button")?.focus();
   }
   function openAbility(request, actor, time, { expected, onComplete, onClose } = {}) {
     init(); close(); context = { request: structuredClone(request), actor, time: structuredClone(time), expected, onComplete, onClose }; opener = actor.id;

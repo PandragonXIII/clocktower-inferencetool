@@ -11,7 +11,7 @@ window.Roundtable = (() => {
   const timeName = (i) => i === 0 ? "初始配置 · setup" : i < 0 ? "未提供时间" : `第 ${Math.ceil(i / 2)} ${i % 2 ? "夜" : "天"}`;
   const value = (p) => p.kind === "role" && typeof p.role_id === "string" && p.role_id ? p.role_id : p.kind === "alignment" && ["good", "evil"].includes(p.alignment) ? p.alignment : undefined;
   const valueName = (kind, v) => kind === "role" ? roles[v] || v : v === "good" ? "善良" : "邪恶";
-  let selectedTime = 0, selectedPlayer, gameId, lastRequest, lastResponse;
+  let selectedTime = 0, selectedPlayer, gameId, lastRequest, lastResponse, showInference = true;
 
   function records(players, assumptions, facts) {
     const identityEntries = [...assumptions, ...facts.filter((f) => f.status === "reported" && ["role", "alignment"].includes(f.type))];
@@ -121,9 +121,11 @@ window.Roundtable = (() => {
     const matched = typeof r.request_id === "string" && typeof g.id === "string" && Number.isInteger(g.revision) && s.request_id === r.request_id && s.game_id === g.id && s.revision === g.revision;
     const placeholder = obj(s.extensions)["adapter:mode"] === "placeholder";
     const validResponse = matched && s.api_version === "1.0" && Array.isArray(s.results) && s.results.every((v) => typeof obj(v).id === "string" && Object.hasOwn(states, obj(v).status));
-    const canInfer = validResponse && s.consistency === "sat" && !placeholder;
-    const unsat = validResponse && s.consistency === "unsat" && !placeholder;
+    const canInfer = showInference && validResponse && s.consistency === "sat" && !placeholder;
+    const unsat = showInference && validResponse && s.consistency === "unsat" && !placeholder;
     const conditional = assumptions.some((a) => a.enabled === true);
+    const probability = showInference && validResponse && !placeholder && r.options?.probability_mode === true ? obj(s.extensions)["reasoner:probabilities"] : undefined;
+    const probabilityRows = probability?.status === "estimated" ? arr(probability.rows) : [];
     const atTime = (entry, id) => { const p = obj(entry.proposition); return p.player_id === id && index(p.time) === selectedTime; };
     const heading = el("div", undefined, "section-head");
     heading.append(el("h2", "圆桌")); root.append(heading);
@@ -194,8 +196,21 @@ window.Roundtable = (() => {
       }
       button.append(el("span", `${p.seat ?? "—"} 号 · ${p.name || p.id}`, "player-name"), el("strong", roleText, "player-role"), el("span", alignmentText, "player-alignment"));
       const inferred = conclusions.some((q) => { const prop = obj(q.proposition); return !confirmed.some((f) => obj(f.proposition).kind === prop.kind && value(obj(f.proposition)) === value(prop)); });
+      const probabilityMatches = probabilityRows.filter((row) => row.player_id === p.id);
+      const probabilities = probabilityMatches.length === 1 ? window.ProbabilityView.entries(probabilityMatches[0]) : [];
+      if (probabilities.length) {
+        button.classList.remove("good", "evil", "pending-good", "pending-evil", "pending-mixed", "conflict");
+        button.classList.add("probability-card");
+        button.querySelector(".player-role").textContent = probabilities[0].name;
+        button.querySelector(".player-role").classList.add(`probability-${probabilities[0].alignment}`);
+        const subtitle = button.querySelector(".player-alignment"); subtitle.textContent = "";
+        probabilities.slice(1, 3).filter((item) => item.value >= .1).forEach((item, i) => { if (i) subtitle.append(document.createTextNode(" · ")); subtitle.append(el("span", item.name, `probability-${item.alignment}`)); });
+        button.append(el("span", "初始身份估计 ⓘ", "probability-caption"));
+        button.title = `${p.seat} 号 · ${p.name || p.id}；初始身份估计：${probabilities.slice(0, 3).map((item) => item.name).join("、")}；点击查看概率环状图。估计不是确定身份。`;
+        button.setAttribute("aria-label", button.title);
+      }
       const tags = [];
-      if (inferred) tags.push(conditional ? "假设下推理" : "必然推理");
+      if (inferred && !probabilities.length) tags.push(conditional ? "假设下推理" : "必然推理");
       const hasConfirmed = determinations.length > 0;
       if (reported.length) tags.push(hasConfirmed ? "另有声明" : "玩家声明");
       if (activeAssumptions.length) tags.push(hasConfirmed ? "另有假设" : "临时假设");
@@ -211,7 +226,7 @@ window.Roundtable = (() => {
           svg.append(path); stamp.append(svg); button.append(stamp);
           button.title += `；${label}`; button.setAttribute("aria-label", button.title);
         }
-       button.addEventListener("click", () => { selectedPlayer = p.id; render(lastRequest, lastResponse); window.PlayerActions.open(lastRequest, p, selectedTime); });
+       button.addEventListener("click", () => { selectedPlayer = p.id; render(lastRequest, lastResponse); window.PlayerActions.open(lastRequest, p, selectedTime, probabilities); });
       board.append(button);
     });
     window.ActionVisuals.render(board, facts, selectedTime, players, size, radius);
@@ -236,6 +251,12 @@ window.Roundtable = (() => {
     root.append(window.Reasoning.render(request, response, window.App.reasonState, rail), records(players, assumptions, facts));
     liveRoot.replaceChildren(root);
     window.TableCamera.mount(viewport, board, controlArea, g.id, size);
+    const viewSwitch = el("label", undefined, "table-view-switch");
+    const toggle = el("input"); toggle.type = "checkbox"; toggle.checked = showInference; toggle.setAttribute("role", "switch"); toggle.dataset.focus = "inference-view";
+    toggle.setAttribute("aria-label", "显示推理结果");
+    viewSwitch.title = "开启显示推理结果；关闭显示未推理时的假设与声明。没有有效结果时显示假设。";
+    toggle.addEventListener("change", () => { showInference = toggle.checked; render(lastRequest, lastResponse); });
+    viewSwitch.append(toggle, el("span", "推理结果")); viewport.querySelector(".table-zoom").prepend(viewSwitch);
     if (focusKey) [...liveRoot.querySelectorAll("[data-focus]")].find((n) => n.dataset.focus === focusKey)?.focus({ preventScroll: true });
   }
    return { render, getSelectedTime() { return selectedTime === 0 ? { phase: "setup" } : { phase: selectedTime % 2 ? "night" : "day", number: Math.ceil(selectedTime / 2) }; }, selectTime(time) { selectedTime = time; render(lastRequest, lastResponse); } };

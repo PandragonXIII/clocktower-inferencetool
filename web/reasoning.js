@@ -81,17 +81,20 @@ window.Reasoning = (() => {
     button.setAttribute("aria-expanded", String(!details.hidden));
     if (previousResponse === response && previousRequest === request && previousError === error) return root;
     previousResponse = response; previousRequest = request; previousError = error;
-    details.replaceChildren();
+     details.replaceChildren();
+     const probabilityDetails = document.getElementById("probability-details");
+     probabilityDetails.replaceChildren(); probabilityDetails.hidden = true;
     if (error) { details.append(el("p", "网络、HTTP 或协议错误不代表输入有矛盾。请检查后台连接或请求内容后重试。")); return root; }
      if (!valid) return root;
-     const probability = response.extensions?.["reasoner:probabilities"];
-     if (probability) {
-       details.append(el("h4", "初始身份概率估计"), el("p", probability.description || "带权抽样估计，不是精确概率，也不是必然结论。", "hint"));
+      const probability = response.extensions?.["reasoner:probabilities"];
+      if (probability) {
+        probabilityDetails.hidden = false;
+        probabilityDetails.append(el("h4", "初始身份概率估计"), el("p", probability.description || "带权抽样估计，不是精确概率，也不是必然结论。", "hint"));
        if (probability.status !== "estimated") details.append(el("p", probability.reason || "概率估计未完成，不能当作零概率。", "warning"));
        else arr(probability.rows).forEach((row) => {
          const player = arr(request.game?.players).find((p) => p.id === row.player_id);
          const values = Object.entries(row.probabilities || {}).sort((a, b) => b[1] - a[1]);
-         details.append(el("p", `${player ? `${player.seat} 号` : row.player_id}：${values.map(([role, value]) => `${name(role)} ${(value * 100).toFixed(1)}%`).join("、")}`));
+          probabilityDetails.append(el("p", `${player ? `${player.seat} 号` : row.player_id}：${values.map(([role, value]) => `${name(role)} ${(value * 100).toFixed(1)}%`).join("、")}`));
        });
         if (probability.status === "estimated" && probability.reason) details.append(el("p", probability.reason, "warning"));
         if (probability.status === "estimated" && response.consistency === "unsat") details.append(el("p", "全部启用条件一起采信时有矛盾；以上概率通过分别采信不同条件组合估计，不表示这些条件可以同时成立。", "hint"));
