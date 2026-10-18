@@ -15,8 +15,91 @@ from botc_reasoner.probability import (
     _info_multiplier,
     _interference_factor,
     draw_setup,
+    joint_assignment_particles,
 )
 from test_reasoning import _parse_fact, _parse_facts, _reason
+
+
+class ParallelEquivalenceTests(unittest.TestCase):
+    def test_parallel_groups_match_one_process(self):
+        world = declare_variables(5, n_nights=1, tag="parallel_eq")
+        solver = world.build_solver()
+        add_game_rules(solver, world, 3, 0, 1, 1)
+        kwargs = dict(
+            n_players=5,
+            counts=(3, 0, 1, 1),
+            beliefs=[(0, Role.CHEF)],
+            solver=solver,
+            world=world,
+            seed=0,
+            target_accepted=24,
+            max_trials=60,
+        )
+        single = joint_assignment_particles(**kwargs, workers=1)
+        several = joint_assignment_particles(**kwargs, workers=3)
+        self.assertEqual(single, several)
+
+    def test_agent_parallel_matches_one_process(self):
+        from botc_reasoner.agent_probability import AgentReasoner
+        import botc_reasoner.agent_probability as agent_module
+
+        world = declare_variables(5, n_nights=1, tag="agent_parallel_eq")
+        solver = world.build_solver()
+        add_game_rules(solver, world, 3, 0, 1, 1)
+        soft_roles = [
+            (0, Role.CHEF),
+            (1, Role.EMPATH),
+            (2, Role.FORTUNE_TELLER),
+            (3, Role.VIRGIN),
+            (4, Role.SOLDIER),
+        ]
+        original = agent_module.worker_count
+        agent_module.worker_count = lambda ntasks, requested=None: 1
+        try:
+            sequential = AgentReasoner(
+                solver, world, 5, (3, 0, 1, 1), target_accepted=6, max_trials=16
+            ).estimate(soft_roles=soft_roles, seed=0)
+        finally:
+            agent_module.worker_count = original
+        parallel = AgentReasoner(
+            solver, world, 5, (3, 0, 1, 1), target_accepted=6, max_trials=16
+        ).estimate(soft_roles=soft_roles, seed=0)
+        self.assertEqual(sequential, parallel)
+
+    def test_duplicate_private_reading_matches_public(self):
+        from z3 import Bool
+
+        from botc_reasoner.agent_probability import AgentReasoner
+        import botc_reasoner.agent_probability as agent_module
+
+        world = declare_variables(5, n_nights=1, tag="private_reuse")
+        solver = world.build_solver()
+        add_game_rules(solver, world, 3, 0, 1, 1)
+        claim = Bool("chef_zero")
+        shared = [AbilityObservation(0, Ability.CHEF, 1, claim)]
+        soft_roles = [(0, Role.CHEF), (1, Role.EMPATH), (2, Role.SOLDIER)]
+        original = agent_module.worker_count
+        agent_module.worker_count = lambda ntasks, requested=None: 1
+        try:
+            reasoner = AgentReasoner(
+                solver, world, 5, (3, 0, 1, 1), target_accepted=6, max_trials=16
+            )
+            public = reasoner.estimate(
+                beliefs=[(0, Role.CHEF)],
+                soft_roles=soft_roles,
+                soft_abilities=shared,
+                seed=0,
+            )
+            both = reasoner.estimate(
+                beliefs=[(0, Role.CHEF)],
+                soft_roles=soft_roles,
+                soft_abilities=shared,
+                private_abilities=shared,
+                seed=0,
+            )
+        finally:
+            agent_module.worker_count = original
+        self.assertEqual(public, both)
 
 
 class SetupPriorTests(unittest.TestCase):

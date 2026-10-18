@@ -56,6 +56,32 @@ class WinRateTests(unittest.TestCase):
         self.assertGreaterEqual(result.good, 0.0)
         self.assertGreaterEqual(result.evil, 0.0)
 
+    def test_parallel_worlds_match_one_process(self):
+        import botc_reasoner.winrate as winrate_module
+
+        state = GameInput.from_dict(
+            {
+                "n_players": 5,
+                "counts": [3, 0, 1, 1],
+                "phase": "day",
+                "day": 1,
+                "propositions": [
+                    {"reliable": False, "kind": "role", "player": 0, "role": "chef"},
+                    {"reliable": False, "kind": "role", "player": 1, "role": "empath"},
+                    {"reliable": False, "kind": "role", "player": 2, "role": "fortune_teller"},
+                ],
+            }
+        )
+        kwargs = dict(samples=2, seed=1, horizon=2, attempts=4, agent_samples=2, agent_trials=4)
+        original = winrate_module.worker_count
+        winrate_module.worker_count = lambda ntasks, requested=None: 1
+        try:
+            sequential = estimate_win_rates(state, **kwargs)
+        finally:
+            winrate_module.worker_count = original
+        parallel = estimate_win_rates(state, **kwargs)
+        self.assertEqual(sequential, parallel)
+
 
 if __name__ == "__main__":
     unittest.main()

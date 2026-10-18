@@ -24,6 +24,7 @@ from typing import Any
 from z3 import And, BoolRef, Implies, Not, Or, Solver, is_true, sat, unknown, unsat
 
 from botc_reasoner.analysis import REASON_BUDGET_EXHAUSTED, REASON_SOLVE_TIMEOUT, Budget
+from botc_reasoner.parallel_support import bind_slot, map_in_order, slot, worker_count
 from botc_reasoner.roles import DEMONS, EVIL_ROLES, MINIONS, OUTSIDERS, TOWNSFOLK, Role
 from botc_reasoner.rules import ability_role
 from botc_reasoner.variables import Ability, TroubleBrewingVars
@@ -259,6 +260,7 @@ def joint_assignment_particles(
     seed: int = 0,
     target_accepted: int | None = None,
     max_trials: int | None = None,
+    workers: int | None = None,
 ) -> list[tuple[tuple[Role, ...], float, tuple[tuple[int, Role], ...]]] | None:
     """按与 :func:`estimate_role_probabilities` 相同的联合权重返回身份样本。
 
@@ -277,98 +279,139 @@ def joint_assignment_particles(
     groups = _credibility_groups(n_players, counts, claims, soft_abilities)
     if not groups:
         return None
-    raw_total = sum(weight for _trusted, weight in groups)
+    bind_slot(
+        solver=solver,
+        world=world,
+        n_players=n_players,
+        counts=counts,
+        beliefs=tuple(beliefs),
+        pinned_roles=tuple(pinned_roles),
+        absent_roles=tuple(absent_roles),
+        drunk_players=tuple(drunk_players),
+        soft_abilities=tuple(soft_abilities),
+        trusted_abilities=tuple(trusted_abilities),
+        seed=seed,
+        target_accepted=target_accepted,
+        max_trials=max_trials,
+        use_solver=use_solver,
+        groups=groups,
+    )
+    flags = map_in_order(
+        _group_is_open, list(range(len(groups))), worker_count(len(groups), workers)
+    )
+    possible = [
+        (index, groups[index][0], groups[index][1])
+        for index, open_group in sorted(flags)
+        if open_group
+    ]
+    if not possible:
+        return None
+    raw_total = sum(weight for _index, _trusted, weight in possible)
+    group_particles = map_in_order(
+        _group_particles,
+        [(index, trusted, weight, raw_total) for index, trusted, weight in possible],
+        worker_count(len(possible), workers),
+    )
     particles: list[tuple[tuple[Role, ...], float, tuple[tuple[int, Role], ...]]] = []
-    for index, (trusted, group_weight) in enumerate(groups):
-        share = group_weight / raw_total
-        group_target = max(1, round(target_accepted * share))
-        group_trials = max(1, round(max_trials * share))
-        if use_solver:
-            assert solver is not None and world is not None
-            solver.push()
-        try:
-            if use_solver:
-                _assert_group(
-                    solver,
-                    world,
-                    (*beliefs, *trusted),
-                    trusted,
-                    soft_abilities,
-                    pinned_roles,
-                    absent_roles,
-                    drunk_players,
-                )
-                if _budget_check(solver) == unsat:
-                    continue
-            samples: list[tuple[Role, ...]] = []
-            if max_trials > 0:
-                samples = _sample_worlds(
-                    n_players,
-                    counts,
-                    beliefs=(*beliefs, *trusted),
-                    pinned_roles=pinned_roles,
-                    absent_roles=absent_roles,
-                    drunk_players=drunk_players,
-                    trusted_claims=trusted,
-                    soft_abilities=soft_abilities,
-                    solver=solver,
-                    world=world,
-                    seed=seed + index,
-                    target_accepted=group_target,
-                    max_trials=group_trials,
-                    use_solver=use_solver,
-                    claims_loaded=use_solver,
-                )
-            if not samples and use_solver:
-                samples = _conditional_bags(
-                    solver,
-                    world,
-                    beliefs=(*beliefs, *trusted),
-                    trusted_claims=trusted,
-                    soft_abilities=soft_abilities,
-                    pinned_roles=pinned_roles,
-                    absent_roles=absent_roles,
-                    drunk_players=drunk_players,
-                    seed=seed + index + 1009,
-                    limit=min(16, max(8, group_target)),
-                )
-            if not samples:
-                continue
-            combined_abilities = [*soft_abilities, *trusted_abilities]
-            weighted_claims = (
-                *trusted,
-                *(
-                    (observation.actor, ability_role(observation.ability))
-                    for observation in trusted_abilities
-                ),
-            )
-            weighted = [
-                (
-                    bag,
-                    _interference_factor(
-                        solver,
-                        world,
-                        bag,
-                        beliefs=(*beliefs, *trusted),
-                        trusted_claims=weighted_claims,
-                        soft_abilities=combined_abilities,
-                    )
-                    if use_solver
-                    else 1.0,
-                )
-                for bag in samples
-            ]
-            piece = group_weight / len(weighted)
-            for bag, factor in weighted:
-                if factor <= 0.0:
-                    continue
-                particles.append((bag, piece * factor, trusted))
-        finally:
-            if use_solver:
-                solver.pop()
+    for _index, chunk in sorted(group_particles):
+        particles.extend(chunk)
     if not particles:
         return None
     return particles
+
+
+def _group_is_open(index: int) -> tuple[int, bool]:
+    """这一组采信方式有没有合法世界。编号原样返回，便于按原顺序合并。"""
+
+    data = slot()
+    trusted, _weight = data["groups"][index]
+    if not data["use_solver"]:
+        return index, True
+    return index, _group_is_possible(
+        data["solver"],
+        data["world"],
+        beliefs=(*data["beliefs"], *trusted),
+        trusted_claims=trusted,
+        soft_abilities=data["soft_abilities"],
+        pinned_roles=data["pinned_roles"],
+        absent_roles=data["absent_roles"],
+        drunk_players=data["drunk_players"],
+    )
+
+
+def _group_particles(
+    spec: tuple[int, tuple[tuple[int, Role], ...], float, float],
+) -> tuple[int, list[tuple[tuple[Role, ...], float, tuple[tuple[int, Role], ...]]]]:
+    """在已经判定可满足的一组里抽样，并乘上该组权重和干扰乘数。"""
+
+    index, trusted, group_weight, raw_total = spec
+    data = slot()
+    share = group_weight / raw_total
+    group_target = max(1, round(data["target_accepted"] * share))
+    samples: list[tuple[Role, ...]] = []
+    if data["max_trials"] > 0:
+        samples = _sample_worlds(
+            data["n_players"],
+            data["counts"],
+            beliefs=(*data["beliefs"], *trusted),
+            pinned_roles=data["pinned_roles"],
+            absent_roles=data["absent_roles"],
+            drunk_players=data["drunk_players"],
+            trusted_claims=trusted,
+            soft_abilities=data["soft_abilities"],
+            solver=data["solver"],
+            world=data["world"],
+            seed=data["seed"] + index,
+            target_accepted=group_target,
+            max_trials=max(1, round(data["max_trials"] * share)),
+            use_solver=data["use_solver"],
+        )
+    if not samples and data["use_solver"]:
+        samples = _conditional_bags(
+            data["solver"],
+            data["world"],
+            beliefs=(*data["beliefs"], *trusted),
+            trusted_claims=trusted,
+            soft_abilities=data["soft_abilities"],
+            pinned_roles=data["pinned_roles"],
+            absent_roles=data["absent_roles"],
+            drunk_players=data["drunk_players"],
+            seed=data["seed"] + index + 1009,
+            limit=min(16, max(8, group_target)),
+        )
+    if not samples:
+        return index, []
+    combined_abilities = [*data["soft_abilities"], *data["trusted_abilities"]]
+    weighted_claims = (
+        *trusted,
+        *(
+            (observation.actor, ability_role(observation.ability))
+            for observation in data["trusted_abilities"]
+        ),
+    )
+    weighted = [
+        (
+            bag,
+            _interference_factor(
+                data["solver"],
+                data["world"],
+                bag,
+                beliefs=(*data["beliefs"], *trusted),
+                trusted_claims=weighted_claims,
+                soft_abilities=combined_abilities,
+            )
+            if data["use_solver"]
+            else 1.0,
+        )
+        for bag in samples
+    ]
+    piece = group_weight / len(weighted)
+    chunk = [
+        (bag, piece * factor, trusted)
+        for bag, factor in weighted
+        if factor > 0.0
+    ]
+    return index, chunk
 
 
 def _credibility_groups(

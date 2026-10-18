@@ -22,6 +22,14 @@ from itertools import combinations
 
 from z3 import And, Not, Solver, sat
 
+from botc_reasoner.agent_probability import AgentReasoner
+from botc_reasoner.parallel_support import (
+    bind_slot,
+    group_budget_for,
+    map_in_order,
+    slot,
+    worker_count,
+)
 from botc_reasoner.engine import NightChoices, Report, Table
 from botc_reasoner.probability import (
     AbilityObservation,
@@ -162,9 +170,8 @@ def estimate_win_rates(
     seed: int = 0,
     horizon: int | None = None,
     attempts: int = 24,
-    agent_samples: int = 2,
-    agent_trials: int = 24,
-    agent_solver: bool = False,
+    agent_samples: int = 40,
+    agent_trials: int = 80,
 ) -> WinRates:
     """对局面做加权采样并模拟，返回两个阵营的胜率。"""
 
@@ -175,7 +182,6 @@ def estimate_win_rates(
     if samples <= 0:
         raise ValueError("samples 必须为正")
     horizon = state.n_players if horizon is None else horizon
-    # 求解器只覆盖已经发生的夜晚。后面的对局在规则引擎里继续，不再扩大模型。
     nights = _history_nights(state)
     world = declare_variables(state.n_players, n_nights=nights, tag=f"win{seed}")
     solver = world.build_solver()
@@ -202,41 +208,75 @@ def estimate_win_rates(
     evil = 0.0
     used = 0.0
     accepted = 0
-    for index, (bag, role_weight, trusted) in enumerate(drawn):
-        realized = None
-        for trial in range(attempts):
-            trial_rng = random.Random(seed + 10007 * (index + 1) + trial)
-            realized = _realize(state, world, solver, bag, trusted, role_weight, trial_rng)
-            if realized is not None:
-                break
-        if realized is None:
-            continue
-        table, minds, weight, bluffs = realized
-        if table.winner is None:
-            _play(
-                table,
-                minds,
-                bluffs,
-                state,
-                world,
-                solver,
-                random.Random(seed + 50021 * (index + 1)),
-                horizon,
-                agent_samples,
-                agent_trials,
-                agent_solver,
-            )
-        if table.winner == "good":
-            good += weight
-        elif table.winner == "evil":
-            evil += weight
-        else:
-            continue
-        used += weight
-        accepted += 1
+    bind_slot(
+        drawn=drawn,
+        seed=seed,
+        state=state,
+        world=world,
+        solver=solver,
+        attempts=attempts,
+        horizon=horizon,
+        agent_samples=agent_samples,
+        agent_trials=agent_trials,
+    )
+    world_workers = worker_count(len(drawn))
+    outcomes = map_in_order(
+        _run_drawn_world,
+        list(range(len(drawn))),
+        world_workers,
+        child_budget=group_budget_for(world_workers),
+    )
+    for _index, good_mass, evil_mass, used_mass, accepted_flag in sorted(outcomes):
+        good += good_mass
+        evil += evil_mass
+        used += used_mass
+        accepted += accepted_flag
     if used <= 0.0:
         raise RuntimeError("采样都与已知死亡或技能声明矛盾，没有可模拟的世界")
     return WinRates(good / used, evil / used, accepted, used)
+
+
+def _run_drawn_world(index: int) -> tuple[int, float, float, float, int]:
+    """推演一个已经抽好的隐藏世界。随机种子只由世界编号决定。"""
+
+    data = slot()
+    bag, role_weight, trusted = data["drawn"][index]
+    seed = data["seed"]
+    realized = None
+    for trial in range(data["attempts"]):
+        trial_rng = random.Random(seed + 10007 * (index + 1) + trial)
+        realized = _realize(
+            data["state"],
+            data["world"],
+            data["solver"],
+            bag,
+            trusted,
+            role_weight,
+            trial_rng,
+        )
+        if realized is not None:
+            break
+    if realized is None:
+        return index, 0.0, 0.0, 0.0, 0
+    table, minds, weight, bluffs = realized
+    if table.winner is None:
+        _play(
+            table,
+            minds,
+            bluffs,
+            data["state"],
+            data["world"],
+            data["solver"],
+            random.Random(seed + 50021 * (index + 1)),
+            data["horizon"],
+            data["agent_samples"],
+            data["agent_trials"],
+        )
+    if table.winner == "good":
+        return index, weight, 0.0, weight, 1
+    if table.winner == "evil":
+        return index, 0.0, weight, weight, 1
+    return index, 0.0, 0.0, 0.0, 0
 
 
 def _play(
@@ -250,31 +290,41 @@ def _play(
     horizon: int,
     agent_samples: int,
     agent_trials: int,
-    agent_solver: bool,
 ) -> None:
     public_roles = list(_soft_roles(state))
     public_reports = list(_ability_reports(state))
-    for mind in minds:
-        if not _evil(table, mind.player) and mind.claimed is None:
-            mind.claimed = mind.believed
-            public_roles.append((mind.player, mind.believed))
-    while table.winner is None and table.night <= horizon and table.day <= horizon:
-        if table.phase == "day":
-            _day(
-                table, minds, bluffs, public_roles, public_reports, state, world, solver, rng,
-                agent_samples, agent_trials, agent_solver,
-            )
-        else:
-            _night(
-                table, minds, public_roles, public_reports, state, world, solver, rng,
-                agent_samples, agent_trials, agent_solver,
-            )
-        _sync_minds(table, minds, bluffs)
+    solver.push()
+    try:
+        session = AgentReasoner(
+            solver,
+            world,
+            table.n,
+            state.counts,
+            target_accepted=agent_samples,
+            max_trials=agent_trials,
+        )
+        for mind in minds:
+            if not _evil(table, mind.player) and mind.claimed is None:
+                mind.claimed = mind.believed
+                public_roles.append((mind.player, mind.believed))
+        while table.winner is None and table.night <= horizon and table.day <= horizon:
+            phase, night, day = table.phase, table.night, table.day
+            if table.phase == "day":
+                _day(
+                    table, minds, bluffs, public_roles, public_reports, state, session, rng,
+                )
+            else:
+                _night(
+                    table, minds, public_roles, public_reports, state, session, rng,
+                )
+            _note_transition(session, table, phase, night, day)
+            _sync_minds(table, minds, bluffs)
+    finally:
+        solver.pop()
 
 
 def _day(
-    table, minds, bluffs, public_roles, public_reports, state, world, solver, rng,
-    agent_samples, agent_trials, agent_solver,
+    table, minds, bluffs, public_roles, public_reports, state, session, rng,
 ) -> None:
     for mind in minds:
         if _evil(table, mind.player):
@@ -283,8 +333,7 @@ def _day(
             _good_share(mind, public_roles, public_reports)
     estimates = {
         mind.player: _estimate(
-            table, mind, public_roles, public_reports, state, world, solver, rng,
-            agent_samples, agent_trials, agent_solver,
+            table, mind, public_roles, public_reports, state, session, rng,
         )
         for mind in minds
         if table.alive[mind.player]
@@ -322,16 +371,14 @@ def _day(
                 votes[nominee][voter] = _nominator_of(nominations, nominee) in table.teammates_of(voter)
             else:
                 probs = estimates.get(voter) or _estimate(
-                    table, minds[voter], public_roles, public_reports, state, world, solver, rng,
-                    agent_samples, agent_trials, agent_solver,
+                    table, minds[voter], public_roles, public_reports, state, session, rng,
                 )
                 votes[nominee][voter] = _evil_probability(probs, nominee) > state.vote_threshold
     table.resolve_day(nominations, votes)
 
 
 def _night(
-    table, minds, public_roles, public_reports, state, world, solver, rng,
-    agent_samples, agent_trials, agent_solver,
+    table, minds, public_roles, public_reports, state, session, rng,
 ) -> None:
     choices = NightChoices()
     estimates: dict[int, list[dict[Role, float]] | None] = {}
@@ -339,8 +386,7 @@ def _night(
     def probs(player: int):
         if player not in estimates:
             estimates[player] = _estimate(
-                table, minds[player], public_roles, public_reports, state, world, solver, rng,
-                agent_samples, agent_trials, agent_solver,
+                table, minds[player], public_roles, public_reports, state, session, rng,
             )
         return estimates[player]
 
@@ -527,7 +573,7 @@ def _info_pair(table, mind: Mind, probs, rng: random.Random) -> tuple[int, int] 
 
 def _drunk_imagine(table, mind, probs, rng) -> None:
     role = mind.believed
-    if role not in _INFO and role is not Role.MONK and role is not Role.BUTLER:
+    if not _role_acts(role, table.night):
         return
     if any(report.when == table.night and report.ability == role.value for report in mind.private):
         return
@@ -535,10 +581,7 @@ def _drunk_imagine(table, mind, probs, rng) -> None:
     mind.private.append(report)
 
 
-def _estimate(
-    table, mind, public_roles, public_reports, state, world, solver, rng,
-    agent_samples, agent_trials, agent_solver=False,
-):
+def _estimate(table, mind, public_roles, public_reports, state, session: AgentReasoner, rng):
     pinned = list(_reliable_roles(state))
     if _evil(table, mind.player):
         if table.n >= 7:
@@ -548,42 +591,14 @@ def _estimate(
         if table.roles[mind.player] is Role.SPY:
             pinned = [(player, table.roles[player]) for player in range(table.n)]
     beliefs = [] if _evil(table, mind.player) else [(mind.player, mind.believed)]
-    if not agent_solver:
-        # 对局中的概率只做快速抽样，不再为每个决策求解整局约束。
-        return estimate_role_probabilities(
-            table.n,
-            state.counts,
-            beliefs=beliefs,
-            pinned_roles=pinned,
-            soft_roles=public_roles,
-            seed=rng.randrange(1_000_000_000),
-            target_accepted=max(agent_samples, 1),
-            max_trials=max(agent_trials, 1),
-        )
-    solver.push()
-    try:
-        for report in mind.private:
-            if _known_ability(report.ability):
-                solver.add(trusted_activation(world, _observation(world, report)))
-        return estimate_role_probabilities(
-            table.n,
-            state.counts,
-            beliefs=beliefs,
-            pinned_roles=pinned,
-            soft_roles=public_roles,
-            soft_abilities=[
-                _observation(world, report)
-                for report in public_reports
-                if _known_ability(report.ability)
-            ],
-            solver=solver,
-            world=world,
-            seed=rng.randrange(1_000_000_000),
-            target_accepted=agent_samples,
-            max_trials=agent_trials,
-        )
-    finally:
-        solver.pop()
+    return session.estimate(
+        beliefs=beliefs,
+        pinned_roles=pinned,
+        soft_roles=public_roles,
+        soft_abilities=_observations(session.world, public_reports),
+        private_abilities=_observations(session.world, mind.private),
+        seed=rng.randrange(1_000_000_000),
+    )
 
 
 def _realize(state, world, solver, bag, trusted, role_weight, rng):
@@ -857,7 +872,9 @@ def _z3_accepts(solver, world, bag, mask, herring, recorded, reports, state) -> 
                 continue
             role = ability_role(Ability(report.ability))
             if _identity_matches(bag, mask, report.actor, role):
-                solver.add(_observation(world, report).claim)
+                observation = _observation(world, report)
+                if observation is not None:
+                    solver.add(observation.claim)
         for day in _completed_days(state):
             _pin_group(solver, world.executed[day], _executions(state, day))
         return solver.check() == sat
@@ -883,10 +900,23 @@ def _pin_group(solver, bits: dict[int, object], chosen: set[int]) -> None:
         solver.add(bit if player in chosen else Not(bit))
 
 
-def _observation(world: TroubleBrewingVars, report: Report) -> AbilityObservation:
+def _observations(world: TroubleBrewingVars, reports) -> list[AbilityObservation]:
+    found = []
+    for report in reports:
+        if not _known_ability(report.ability):
+            continue
+        observation = _observation(world, report)
+        if observation is not None:
+            found.append(observation)
+    return found
+
+
+def _observation(world: TroubleBrewingVars, report: Report) -> AbilityObservation | None:
     ability = Ability(report.ability)
     actor = report.actor
     when = report.when
+    if when not in world.ability_used[ability]:
+        return None
     bits = [world.ability_used[ability][when][actor]]
     target = report.targets[0] if len(report.targets) == 1 else None
     if ability is Ability.FORTUNE_TELLER and len(report.targets) == 2:
@@ -1021,6 +1051,16 @@ def _nominator_of(nominations, nominee: int) -> int:
     return -1
 
 
+def _note_transition(session: AgentReasoner, table: Table, phase: str, night: int, day: int) -> None:
+    """一个阶段结算后，把新的公开存活写进智能体的求解器。"""
+
+    if table.phase == "day" and phase == "night":
+        session.observe_alive("dawn", night, table.alive)
+    elif table.phase == "night" and phase == "day":
+        session.observe_alive("night_start", table.night, table.alive)
+    del day
+
+
 def _history_nights(state: GameInput) -> int:
     """求解器需要覆盖的夜数：已经发生的夜，以及输入里出现过的技能时间。"""
 
@@ -1127,9 +1167,10 @@ def _known_ability(name: str | None) -> bool:
 
 def _soft_observations(world, state: GameInput) -> list[AbilityObservation]:
     return [
-        _observation(world, report)
+        observation
         for report in _ability_reports(state)
         if not _report_reliable(state, report) and _known_ability(report.ability)
+        if (observation := _observation(world, report)) is not None
     ]
 
 
@@ -1227,12 +1268,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--horizon", type=int, default=None)
-    parser.add_argument("--agent-samples", type=int, default=2)
-    parser.add_argument(
-        "--agent-solver",
-        action="store_true",
-        help="对局中的每次决策都用求解器估计概率，慢很多",
-    )
+    parser.add_argument("--agent-samples", type=int, default=40)
+    parser.add_argument("--agent-trials", type=int, default=80)
     args = parser.parse_args(argv)
     raw = sys.stdin.read() if not args.path else open(args.path, encoding="utf-8").read()
     state = GameInput.from_dict(json.loads(raw))
@@ -1242,7 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         horizon=args.horizon,
         agent_samples=args.agent_samples,
-        agent_solver=args.agent_solver,
+        agent_trials=args.agent_trials,
     )
     json.dump(result.as_dict(), sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
