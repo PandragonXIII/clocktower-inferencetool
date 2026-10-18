@@ -32,10 +32,10 @@ window.ClocktowerSkills = (() => {
   add("recluse", "登记结果记录", "被动 / 被其他技能查验触发", 0, 0, selectResult(choices(["role", "登记为某角色（备注填写）"], ["alignment", "登记为某阵营（备注填写）"], unknown)), { passive: true });
   add("saint", "处决后胜负记录", "被动 / 被处决触发", 0, 0, selectResult(choices(["good_lost", "善良失败"], ["good_won", "善良胜利"], ["ongoing", "对局继续"], unknown)), { passive: true });
   add("poisoner", "投毒", "每夜", 1, 1, { kind: "none" });
-  add("spy", "查看魔典记录", "每夜", 0, 15, { kind: "text" }, { help: "请用多行文本保留完整魔典信息；有关玩家可多选但非必选。" });
-  add("scarlet_woman", "转化记录", "被动 / 恶魔死亡触发", 0, 0, selectResult(choices(["occurred", "发生转化"], ["not_occurred", "未发生转化"], ["role", "转化为某角色（下方选择）"], unknown)), { passive: true, optionalRole: true });
+   add("spy", "查看魔典记录", "每夜", 0, 15, { kind: "none" }, { allPlayers: true });
+   add("scarlet_woman", "转化记录", "被动 / 恶魔死亡触发", 0, 0, selectResult(choices(["occurred", "发生转化"], ["not_occurred", "未发生转化"], unknown)), { passive: true });
   add("baron", "外来者配置记录", "初始配置", 0, 0, { kind: "number", max: "players" }, { passive: true });
-  add("imp", "夜间击杀", "每夜（首夜除外）", 1, 1, selectResult(death), { help: "可选择自己；观察到死亡不等于确认死因或真实身份。" });
+   add("imp", "夜间击杀", "每夜（首夜除外）", 1, 1, { kind: "none" }, { help: "可选择自己；仅记录击杀目标，不会立即获知是否杀死。" });
 
   function validate(skill, data, players) {
     if (!skill) throw new Error("请选择技能。");

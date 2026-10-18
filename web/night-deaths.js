@@ -5,6 +5,20 @@ window.NightDeaths = (() => {
   const el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
   const index = (t) => t?.phase === "setup" ? 0 : ["night", "day"].includes(t?.phase) && Number.isInteger(t.number) && t.number >= 1 && t.number <= 99 ? t.number * 2 - (t.phase === "night" ? 1 : 0) : -1;
   const records = (facts) => (Array.isArray(facts) ? facts : []).filter((f) => f?.type === "botc:night_deaths");
+  function deathsAt(facts, time) {
+    const at = index(time), events = new Map();
+    if (at <= 0) return events;
+    const earlier = deadAt(facts, at === 1 ? { phase: "setup" } : { phase: at % 2 ? "day" : "night", number: Math.floor(at / 2) });
+    (Array.isArray(facts) ? facts : []).forEach((f) => {
+      const d = f?.data;
+      if (f?.status !== "confirmed" || index(d?.time) !== at) return;
+      if (f.type === "botc:night_deaths" && d.time.phase === "night" && d.result === "deaths" && Array.isArray(d.player_ids)) {
+        d.player_ids.forEach((id) => { if (typeof id === "string" && !earlier.has(id)) events.set(id, "night"); });
+      }
+      if (f.type === "botc:day_vote" && d.time.phase === "day" && d.stage === "settled" && typeof d.execution?.player_id === "string" && !earlier.has(d.execution.player_id)) events.set(d.execution.player_id, "execution");
+    });
+    return events;
+  }
   function deadAt(facts, time) {
     const dead = new Set(), at = index(time);
     records(facts).forEach((f) => {
@@ -65,5 +79,5 @@ window.NightDeaths = (() => {
     });
     dialog.showModal(); cancel.focus();
   }
-  return { records, deadAt, open, close, sync, accepts(expected) { return dialog?.open === true && context === expected; } };
+  return { records, deadAt, deathsAt, open, close, sync, accepts(expected) { return dialog?.open === true && context === expected; } };
 })();

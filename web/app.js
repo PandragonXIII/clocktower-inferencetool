@@ -317,6 +317,16 @@ function mutateRequest(change, time, viewTime) {
 }
 window.App = {
   get votingContext() { return epoch; },
+  renamePlayer(playerId, name, gameId) {
+    if (currentRequest?.game?.id !== gameId) throw new Error("对局已改变，请重新打开玩家窗口。");
+    const value = name.trim();
+    if (!value || value.length > 80) throw new Error("玩家姓名须为 1–80 个字符。");
+    return mutateRequest((r) => {
+      const player = r.game.players.find((p) => p.id === playerId);
+      if (!player) throw new Error("该玩家已不在当前对局。");
+      player.name = value;
+    });
+  },
   reason: sendRequest,
   get phaseState() { return phaseState(); },
   advancePhase() {
@@ -367,6 +377,14 @@ window.App = {
     const request = mutateRequest((r) => { r.game.time = time; }, undefined, time);
     window.DayVoting.close(); window.PlayerActions.close();
     notify(`已进入第 ${time.number} 夜；未自动执行推理。`); return request;
+  },
+  reopenVoting(expected) {
+    assertVoting(expected, "settled");
+    return mutateRequest((r) => {
+      const d = window.DayVoting.current(r).data;
+      Object.assign(d, { stage: "voting", execution: null, override: false });
+      Object.assign(d, window.DayVoting.defaultResult(r));
+    }, undefined, currentRequest.game.time);
   },
   confirmNightDeaths(expected, playerIds, result) {
     const state = phaseState(), r = currentRequest;

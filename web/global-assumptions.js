@@ -50,6 +50,7 @@ window.GlobalAssumptions = (() => {
     if (!records.length) list.append(el("p", "暂无全局假设。点击“新增假设”添加角色不在场等条件。", "empty"));
     records.forEach((f) => {
       const d = f.data || {}, active = d.requested_enabled === true, card = el("article", undefined, "evidence record-card"); card.dataset.globalAssumption = f.id;
+      card.classList.add("record-assumption"); card.append(el("span", "全局假设", "record-type"));
       const heading = d.kind === "role_absent" ? `${name(d.role_id)}不在场 ?` : "其他全局假设";
       const head = el("div", undefined, "record-head"), copy = el("div", undefined, "record-copy");
       copy.append(el("h5", heading), el("p", timeName(d.time)), el("p", active ? "希望采用 · 待后台接入，尚未参与推理" : "已停用 · 尚未参与推理", "warning"));
