@@ -1,0 +1,25 @@
+{
+  "n_players": 8,
+  "counts": [5, 1, 1, 1],
+  "phase": "day",
+  "day": 2,
+  "night": 2,
+  "propositions": [
+    {"kind": "belief", "player": 3, "role": "undertaker"},
+    {"reliable": false, "kind": "role", "player": 0, "role": "chef"},
+    {"reliable": false, "kind": "role", "player": 1, "role": "empath"},
+    {"reliable": false, "kind": "role", "player": 2, "role": "fortune_teller"},
+    {"reliable": false, "kind": "role", "player": 4, "role": "virgin"},
+    {"reliable": false, "kind": "role", "player": 5, "role": "investigator"},
+    {"reliable": false, "kind": "role", "player": 6, "role": "monk"},
+    {"reliable": false, "kind": "role", "player": 7, "role": "soldier"},
+    {"reliable": false, "kind": "ability", "player": 0, "ability": "chef", "night": 1, "number": 1},
+    {"reliable": false, "kind": "ability", "player": 1, "ability": "empath", "night": 1, "number": 0},
+    {"reliable": false, "kind": "ability", "player": 2, "ability": "fortune_teller", "night": 1, "targets": [0, 1], "yes": true},
+    {"reliable": false, "kind": "ability", "player": 5, "ability": "investigator", "night": 1, "role": "scarlet_woman", "targets": [1, 4]},
+    {"reliable": false, "kind": "ability", "player": 1, "ability": "empath", "night": 2, "number": 0},
+    {"reliable": false, "kind": "ability", "player": 2, "ability": "fortune_teller", "night": 2, "targets": [3, 4], "yes": false},
+    {"reliable": true, "kind": "night_deaths", "night": 2, "players": []},
+    {"reliable": true, "kind": "executions", "day": 1, "players": []}
+  ]
+}
