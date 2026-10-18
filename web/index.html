@@ -14,6 +14,7 @@
   <script src="assumption-timeline.js" defer></script>
   <script src="action-visuals.js" defer></script>
   <script src="table-camera.js" defer></script>
+  <script src="probability-view.js" defer></script>
   <script src="roundtable.js" defer></script>
   <script src="setup.js" defer></script>
   <script src="global-assumptions.js" defer></script>
@@ -42,6 +43,7 @@
     <p id="notice" role="status" aria-live="polite"></p>
     <section id="roundtable" class="card" aria-label="玩家圆桌"></section>
     <details class="card advanced"><summary>高级数据 / 调试 <span class="hint">JSON 导入、协议明细与完整原始数据</span></summary>
+      <section id="probability-details" hidden aria-label="初始身份概率估计完整列表"></section>
       <div class="toolbar"><span id="source" class="badge"></span><label for="example">示例</label><select id="example"><option value="success">成功</option><option value="conflict">矛盾</option><option value="error">HTTP 错误</option></select><button id="reload" type="button">加载示例</button></div>
       <section aria-label="JSON 数据编辑">
       <div class="editors">
