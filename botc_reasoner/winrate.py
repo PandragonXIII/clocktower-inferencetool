@@ -105,8 +105,8 @@ class GameInput:
     day: int
     night: int
     propositions: tuple[Proposition, ...] = ()
-    nominate_threshold: float = 0.6
-    vote_threshold: float = 0.6
+    nominate_threshold: float = 0.3
+    vote_threshold: float = 0.3
 
     @staticmethod
     def from_dict(data: dict) -> GameInput:
@@ -131,8 +131,8 @@ class GameInput:
             day=day,
             night=night,
             propositions=props,
-            nominate_threshold=float(data.get("nominate_threshold", 0.6)),
-            vote_threshold=float(data.get("vote_threshold", 0.6)),
+            nominate_threshold=float(data.get("nominate_threshold", 0.3)),
+            vote_threshold=float(data.get("vote_threshold", 0.3)),
         )
 
 
@@ -453,16 +453,11 @@ def _fake_report(table, mind, role: Role, night: int, rng: random.Random) -> Rep
         known_demons.add(actor)
     if role is Role.FORTUNE_TELLER:
         pool = [player for player in range(table.n) if player != actor]
-        pairs = [pair for pair in combinations(pool, 2) if mind.info_uses.get(tuple(sorted(pair)), 0) < 2]
+        pairs = [pair for pair in combinations(pool, 2) if mind.info_uses.get(tuple(sorted(pair)), 0) == 0]
         if not pairs:
-            pairs = list(combinations(pool, 2))
+            return Report(actor, "fortune_teller", night, ())
         rng.shuffle(pairs)
-        chosen = pairs[0]
-        for pair in pairs:
-            if mind.info_uses.get(tuple(sorted(pair)), 0) == 0:
-                chosen = pair
-                break
-        pair = tuple(sorted(chosen))
+        pair = tuple(sorted(pairs[0]))
         mind.info_uses[pair] = mind.info_uses.get(pair, 0) + 1
         yes = False if (mind_is_minion(table, actor) and any(player in known_demons for player in pair)) else rng.random() < 0.5
         stored = mind.cover.get(("fortune", pair))
@@ -554,18 +549,18 @@ def _info_one(table, mind: Mind, probs, rng: random.Random) -> int | None:
 
 
 def _info_pair(table, mind: Mind, probs, rng: random.Random) -> tuple[int, int] | None:
-    pool = [player for player in table.alive_ids() if player != mind.player]
-    pairs = list(combinations(pool, 2))
-    if not pairs:
+    """挑选一对还没一起查过的人。同一个人可以进入不同的组合，同一对不再查第二次。"""
+
+    del rng
+    pool = [player for player in range(table.n) if player != mind.player]
+    fresh = [
+        pair
+        for pair in combinations(pool, 2)
+        if mind.info_uses.get(tuple(sorted(pair)), 0) == 0
+    ]
+    if not fresh:
         return None
-    fresh = [pair for pair in pairs if mind.info_uses.get(tuple(sorted(pair)), 0) == 0]
-    once = [pair for pair in pairs if mind.info_uses.get(tuple(sorted(pair)), 0) == 1]
-    if fresh:
-        chosen = min(fresh, key=lambda pair: _pair_score(probs, pair))
-    elif once and rng.random() < _REPEAT:
-        chosen = min(once, key=lambda pair: _pair_score(probs, pair))
-    else:
-        return None
+    chosen = min(fresh, key=lambda pair: _pair_score(probs, pair))
     key = tuple(sorted(chosen))
     mind.info_uses[key] = mind.info_uses.get(key, 0) + 1
     return key
@@ -679,7 +674,7 @@ def _sample_historical(table, night, bag, mask, reports, required: set[int], rng
     factor = 1.0
     choices = NightChoices()
     poisoner = table._find(Role.POISONER)
-    if poisoner is not None and table.alive[poisoner]:
+    if night == 1 and poisoner is not None and table.alive[poisoner]:
         claim = _matched(bag, mask, reports, poisoner, "poisoner", night)
         if claim and claim.targets:
             choices.poison = claim.targets[0]
@@ -696,37 +691,11 @@ def _sample_historical(table, night, bag, mask, reports, required: set[int], rng
             choices.poison = rng.choice(options)
             factor /= len(options)
     if night > 1:
-        monk = table._find(Role.MONK)
-        if monk is not None and table.alive[monk]:
-            claim = _matched(bag, mask, reports, monk, "monk", night)
-            blocked = set(required)
-            if claim and claim.targets:
-                choices.monk = claim.targets[0]
-            else:
-                options = [
-                    player
-                    for player in table.alive_ids()
-                    if player != monk and player != table.last_monk and player not in blocked
-                ]
-                if not options:
-                    options = [player for player in table.alive_ids() if player != monk]
-                if options:
-                    choices.monk = rng.choice(options)
-                    factor /= len(options)
-        imp = table._find(Role.IMP)
-        if imp is not None and table.alive[imp]:
-            claim = _matched(bag, mask, reports, imp, "imp", night)
-            if claim and claim.targets:
-                choices.imp = claim.targets[0]
-                choices.bounce = -1
-            else:
-                picked = _pick_imp(table, imp, required, choices.monk)
-                if picked is None:
-                    return None
-                target, bounce, piece = picked
-                choices.imp = target
-                choices.bounce = bounce
-                factor *= piece
+        explained = _explain_historical_kills(table, night, bag, mask, reports, required, rng)
+        if explained is None:
+            return None
+        choices.poison, choices.monk, choices.imp, choices.bounce, piece = explained
+        factor *= piece
         if required and table._find(Role.RAVENKEEPER) in required:
             raven = table._find(Role.RAVENKEEPER)
             claim = _matched(bag, mask, reports, raven, "ravenkeeper", night) if raven is not None else None
@@ -760,42 +729,150 @@ def _sample_historical(table, night, bag, mask, reports, required: set[int], rng
     return choices, factor
 
 
-def _pick_imp(table, imp, required: set[int], monk_target: int | None):
-    if table.droisoned(imp):
-        if required:
-            return None
-        options = [player for player in table.alive_ids() if not table.evil(player)] or table.alive_ids()
-        return options[0], -1, 1.0 / len(options)
-    if not required:
-        soldiers = [
-            player
-            for player in table.alive_ids()
-            if table.roles[player] is Role.SOLDIER and not table.droisoned(player)
-        ]
-        if soldiers:
-            return soldiers[0], -1, 1.0 / len(soldiers)
-        monk = table._find(Role.MONK)
-        if (
-            monk_target is not None
-            and monk is not None
-            and table.alive[monk_target]
-            and not table.droisoned(monk)
-        ):
-            return monk_target, -1, 1.0
+def _explain_historical_kills(table, night, bag, mask, reports, required: set[int], rng):
+    """为已经发生的死亡找一个规则上说得通的当晚选择。
+
+    多种做法都能对上时，优先恶魔确实出刀、投毒者毒善良玩家的做法。
+    对不上策略但规则允许的做法仍然保留，例如无人死亡时恶魔没有出刀。
+    一晚死了两个人、而这套身份做不到，才返回 None。
+    """
+
+    if len(required) > 1:
         return None
-    if len(required) != 1:
-        return None
-    victim = next(iter(required))
-    if victim == imp:
-        return imp, -1, 1.0
-    if victim not in table.alive_ids() or table.evil(victim):
-        return None
-    if table.roles[victim] is Role.SOLDIER and not table.droisoned(victim):
-        return None
+    poisoner = table._find(Role.POISONER)
     monk = table._find(Role.MONK)
-    if monk_target == victim and monk is not None and not table.droisoned(monk):
+    imp = table._find(Role.IMP)
+    poison_claim = _matched(bag, mask, reports, poisoner, "poisoner", night) if poisoner is not None else None
+    monk_claim = _matched(bag, mask, reports, monk, "monk", night) if monk is not None else None
+    imp_claim = _matched(bag, mask, reports, imp, "imp", night) if imp is not None else None
+    poisons = _historical_poisons(table, poison_claim)
+    monks = _historical_monks(table, night, monk_claim)
+    imps = _historical_imps(table, night, imp_claim)
+    if not poisons or not monks or not imps:
         return None
-    return victim, -1, 1.0
+    legal = []
+    for poison in poisons:
+        for monk_target in monks:
+            for target in imps:
+                for bounce in _historical_bounces(table, poison, target):
+                    deaths = _predict_night_deaths(table, night, poison, monk_target, target, bounce)
+                    if deaths == required:
+                        legal.append((poison, monk_target, target, bounce))
+    if not legal:
+        return None
+    preferred = [item for item in legal if _kill_follows_strategy(table, required, *item)]
+    pool = preferred or legal
+    poison, monk_target, target, bounce = rng.choice(pool)
+    return poison, monk_target, target, bounce, 1.0 / len(pool)
+
+
+def _historical_poisons(table, claim):
+    poisoner = table._find(Role.POISONER)
+    if poisoner is None or not table.alive[poisoner]:
+        return [None]
+    if claim is not None and claim.targets:
+        return [claim.targets[0]]
+    return [None, *table.alive_ids()]
+
+
+def _historical_monks(table, night, claim):
+    if night < 2:
+        return [None]
+    monk = table._find(Role.MONK)
+    if monk is None or not table.alive[monk]:
+        return [None]
+    if claim is not None and claim.targets:
+        return [claim.targets[0]]
+    return [None, *[player for player in table.alive_ids() if player != monk and player != table.last_monk]]
+
+
+def _historical_imps(table, night, claim):
+    if night < 2:
+        return [None]
+    imp = table._find(Role.IMP)
+    if imp is None or not table.alive[imp]:
+        return [None]
+    if claim is not None and claim.targets:
+        return [claim.targets[0]]
+    return [None, *table.alive_ids()]
+
+
+def _historical_bounces(table, poison, target):
+    if target is None or not _healthy_mayor(table, poison, target):
+        return [-1]
+    return [-1, *[player for player in table.alive_ids() if player != target and not table.evil(player)]]
+
+
+def _healthy_mayor(table, poison, player) -> bool:
+    if table.roles[player] is not Role.MAYOR or table.roles[player] is Role.DRUNK:
+        return False
+    poisoner = table._find(Role.POISONER)
+    poisoned = (
+        poisoner is not None
+        and table.alive[poisoner]
+        and table.roles[poisoner] is not Role.DRUNK
+        and poison == player
+    )
+    return not poisoned
+
+
+def _predict_night_deaths(table, night, poison, monk, imp, bounce) -> set[int]:
+    """按结算顺序预测这一夜会死的人。不改动牌桌。"""
+
+    if night < 2:
+        return set()
+    poisoned: set[int] = set()
+    poisoner = table._find(Role.POISONER)
+    if (
+        poisoner is not None
+        and table.alive[poisoner]
+        and poison is not None
+        and table.roles[poisoner] is not Role.DRUNK
+    ):
+        poisoned.add(poison)
+
+    def droisoned(player: int) -> bool:
+        return table.roles[player] is Role.DRUNK or player in poisoned
+
+    protected = None
+    monk_seat = table._find(Role.MONK)
+    if monk_seat is not None and table.alive[monk_seat] and monk is not None:
+        if not droisoned(monk_seat) and monk != monk_seat and monk != table.last_monk:
+            protected = monk
+    demon = table._find(Role.IMP)
+    if demon is None or not table.alive[demon] or imp is None or droisoned(demon):
+        return set()
+    if not table.alive[imp]:
+        return set()
+    if imp == demon:
+        return {demon}
+    if imp == protected or (table.roles[imp] is Role.SOLDIER and not droisoned(imp)):
+        return set()
+    victim = imp
+    if table.roles[imp] is Role.MAYOR and not droisoned(imp):
+        if (
+            bounce is not None
+            and bounce >= 0
+            and bounce != imp
+            and bounce < table.n
+            and table.alive[bounce]
+            and not table.evil(bounce)
+        ):
+            victim = bounce
+    return {victim}
+
+
+def _kill_follows_strategy(table, required: set[int], poison, monk, imp, bounce) -> bool:
+    """恶魔有出刀、投毒者优先毒善良玩家。镇长替死不算这条策略。"""
+
+    poisoner = table._find(Role.POISONER)
+    if poisoner is not None and table.alive[poisoner] and table.roles[poisoner] is not Role.DRUNK:
+        goods = [player for player in table.alive_ids() if not table.evil(player)]
+        if goods and poison not in goods:
+            return False
+    if not required:
+        return imp is not None and _predict_night_deaths(table, table.night, poison, monk, imp, bounce) == set()
+    return imp == next(iter(required))
 
 
 def _claims_match(table, bag, mask, reports, learned: list[Report]) -> bool:

@@ -326,7 +326,15 @@ class Table:
             return
         victim = target
         if self.roles[target] is Role.MAYOR and not self.droisoned(target):
-            if bounce is not None and bounce != target and self.alive[bounce] and not self.evil(bounce):
+            # bounce < 0 表示镇长本人死去，不替死。None 才是五成随机替死。
+            if (
+                bounce is not None
+                and bounce >= 0
+                and bounce != target
+                and bounce < self.n
+                and self.alive[bounce]
+                and not self.evil(bounce)
+            ):
                 victim = bounce
             elif bounce is None and self.rng.random() < 0.5:
                 options = [

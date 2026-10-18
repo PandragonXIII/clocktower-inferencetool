@@ -1,8 +1,75 @@
+import random
 import unittest
 
+from botc_reasoner.engine import Table
 from botc_reasoner.probability import estimate_role_probabilities, joint_assignment_particles
 from botc_reasoner.roles import Role
-from botc_reasoner.winrate import GameInput, estimate_win_rates
+from botc_reasoner.winrate import GameInput, Mind, _info_pair, _sample_historical, estimate_win_rates
+
+
+def _night_table(roles):
+    return Table(
+        roles=list(roles),
+        alive=[True] * len(roles),
+        drunk_mask=None,
+        red_herring=None,
+        bluffs=(),
+        rng=random.Random(0),
+        night=2,
+        day=1,
+        phase="night",
+        fixed_registration=True,
+    )
+
+
+class HistoricalKillTests(unittest.TestCase):
+    def test_no_death_accepts_a_demon_who_does_not_kill(self):
+        roles = [Role.IMP, Role.POISONER, Role.CHEF, Role.EMPATH, Role.VIRGIN]
+        chosen = set()
+        for seed in range(40):
+            table = _night_table(roles)
+            choices, _factor = _sample_historical(
+                table, 2, tuple(roles), None, [], set(), random.Random(seed),
+            )
+            chosen.add(choices.imp)
+            before = set(table.alive_ids())
+            table.resolve_night(choices)
+            self.assertEqual(before - set(table.alive_ids()), set())
+        self.assertIn(None, chosen)
+
+    def test_no_death_prefers_the_soldier_when_one_is_in_play(self):
+        table = _night_table([Role.IMP, Role.POISONER, Role.SOLDIER, Role.CHEF, Role.EMPATH])
+        choices, _factor = _sample_historical(
+            table, 2, tuple(table.roles), None, [], set(), random.Random(1),
+        )
+        self.assertEqual(choices.imp, 2)
+        before = set(table.alive_ids())
+        table.resolve_night(choices)
+        self.assertEqual(before - set(table.alive_ids()), set())
+
+    def test_fortune_reuses_a_player_in_a_new_pair_only(self):
+        table = _night_table(
+            [Role.FORTUNE_TELLER, Role.CHEF, Role.EMPATH, Role.IMP, Role.POISONER]
+        )
+        mind = Mind(0, Role.FORTUNE_TELLER)
+        mind.info_uses[(1, 2)] = 1
+        probs = [{Role.CHEF: 1.0} for _ in range(table.n)]
+        first = _info_pair(table, mind, probs, random.Random(0))
+        self.assertEqual(first, (1, 3))
+        seen = {first}
+        while True:
+            nxt = _info_pair(table, mind, probs, random.Random(0))
+            if nxt is None:
+                break
+            seen.add(nxt)
+        self.assertNotIn((1, 2), seen)
+        self.assertEqual(mind.info_uses[(1, 2)], 1)
+
+    def test_two_deaths_in_one_night_is_impossible(self):
+        table = _night_table([Role.IMP, Role.POISONER, Role.SOLDIER, Role.CHEF, Role.EMPATH])
+        self.assertIsNone(
+            _sample_historical(table, 2, tuple(table.roles), None, [], {2, 3}, random.Random(0))
+        )
 
 
 class JointSampleTests(unittest.TestCase):
