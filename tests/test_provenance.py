@@ -145,7 +145,7 @@ class GameRulesConsistencyTests(unittest.TestCase):
         self.assertTrue(expected.issubset(collector.catalog))
         for spec in collector.catalog.values():
             if spec.id != UNCLASSIFIED_RULE_ID:
-                self.assertEqual(spec.source, WIKI_URL)
+                self.assertTrue(spec.source.startswith("https://"))
 
 
 if __name__ == "__main__":

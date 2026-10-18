@@ -198,6 +198,13 @@ function prepareQueries() {
     $("request-json").value = JSON.stringify(next, null, 2); $("response-json").value = "";
   }
 }
+function requestTimeoutMs(request) {
+  const options = object(request.options);
+  const bounded = (value, fallback, max) => Number.isInteger(value) && value >= 1 && value <= max ? value : fallback;
+  const analysis = bounded(options.total_timeout_ms, 8000, 60000);
+  const probability = options.probability_mode === true ? bounded(options.probability_timeout_ms, 120000, 300000) : 0;
+  return analysis + probability + 30000;
+}
 async function sendRequest() {
   if (requestBusy) return;
   window.NightDeaths.close();
@@ -215,9 +222,10 @@ async function sendRequest() {
     render(); notify(`无法发送：${reasonError}`, true); return;
   }
   requestBusy = true; pendingTicket = requestTicket;
-  render(); notify("正在发送完整快照到同源后台…");
+  const timeoutMs = requestTimeoutMs(request);
+  render(); notify(`正在发送完整快照到同源后台，最多等待 ${Math.ceil(timeoutMs / 1000)} 秒…`);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const result = await fetch("/api/v1/reason", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(currentRequest), signal: controller.signal });
     const body = await result.text();
@@ -239,8 +247,8 @@ async function sendRequest() {
     notify(placeholder ? "后台响应已接收，但当前为占位适配器，未运行推理引擎，consistency/查询状态均为 unknown。" : "后台响应已接收。");
   } catch (error) {
     if (requestTicket === epoch) {
-      reasonError = error.name === "AbortError" ? "请求超过 20 秒，请稍后重试。" : error.message; errorTicket = epoch;
-      notify(`发送未成功：${reasonError}。网络、服务或协议失败时不会伪造结果。`, true);
+      reasonError = error.name === "AbortError" ? `请求超过 ${Math.ceil(timeoutMs / 1000)} 秒（分析与概率预算另加 30 秒宽限），请稍后重试` : error.message; errorTicket = epoch;
+      notify(`发送未成功：${reasonError.replace(/[。.]$/, "")}。网络、服务或协议失败时不会伪造结果。`, true);
     }
   } finally {
     clearTimeout(timeout); requestBusy = false; pendingTicket = undefined;
@@ -312,10 +320,13 @@ function mutateRequest(change, time, viewTime) {
   next.game.revision += 1; next.request_id = uniqueId("req");
   epoch += 1; currentRequest = next; currentResponse = undefined;
   $("request-json").value = JSON.stringify(next, null, 2); $("response-json").value = "";
-  source = "本地编辑，尚未计算"; notify("记录已更新，旧响应已清除。技能观察仅记录，尚未参与推理。"); render(viewTime);
+  source = "本地编辑，尚未计算"; notify("记录已更新，旧响应已清除；启用条件将在下次推理生效。"); render(viewTime);
   return structuredClone(next);
 }
 window.App = {
+  setProbabilityMode(enabled) {
+    return mutateRequest((r) => { r.options = { ...object(r.options), probability_mode: Boolean(enabled) }; });
+  },
   get votingContext() { return epoch; },
   renamePlayer(playerId, name, gameId) {
     if (currentRequest?.game?.id !== gameId) throw new Error("对局已改变，请重新打开玩家窗口。");
@@ -367,8 +378,9 @@ window.App = {
     assertVoting(expected, "voting");
     if (playerId !== null) validatePlayerTime(currentRequest, playerId, currentRequest.game.time);
     return mutateRequest((r) => {
-      const d = window.DayVoting.current(r).data, result = window.DayVoting.defaultResult(r);
+      const fact = window.DayVoting.current(r), d = fact.data, result = window.DayVoting.defaultResult(r);
       Object.assign(d, result, { stage: "settled", execution: { player_id: playerId }, override: result.default_player_id !== playerId });
+      fact.enabled = true;
     }, undefined, currentRequest.game.time);
   },
   finishVotingDay(expected) {
@@ -391,17 +403,18 @@ window.App = {
     if (expected !== epoch || !window.NightDeaths.accepts(expected) || state.disabled || r?.game?.time?.phase !== "night") throw new Error("对局已改变或当前无法推进，请重新打开死亡确认。");
     if (!Array.isArray(playerIds) || new Set(playerIds).size !== playerIds.length || !["deaths", "none"].includes(result) || (result === "none" ? playerIds.length !== 0 : playerIds.length === 0)) throw new Error("请选择死亡玩家，或明确确认无人死亡。");
     const time = structuredClone(r.game.time), dead = window.NightDeaths.deadAt(r.facts, time);
+    if (time.number === 1 && playerIds.length) throw new Error("模型首夜不支持死亡记录。");
     if (window.NightDeaths.records(r.facts).some((f) => f.data?.time?.phase === "night" && f.data.time.number === time.number)) throw new Error("本夜已有死亡记录，不能重复记录。");
     playerIds.forEach((id) => {
       validatePlayerTime(r, id, time);
       if (dead.has(id)) throw new Error("已死亡玩家不能重复死亡。");
     });
     const request = mutateRequest((next) => {
-      next.facts.push({ id: uniqueId("f-night-deaths"), type: "botc:night_deaths", status: "confirmed", enabled: false, data: { time, player_ids: [...playerIds], result } });
+      next.facts.push({ id: uniqueId("f-night-deaths"), type: "botc:night_deaths", status: "confirmed", enabled: true, data: { time, player_ids: [...playerIds], result } });
       next.game.time = structuredClone(state.time);
     }, undefined, state.time);
     window.PlayerActions.close();
-    notify(`死亡已记录，尚未参与推理。对局已推进至${state.hint}；未自动执行推理。`);
+    notify(`死亡已记录，启用条件将在下次推理生效。对局已推进至${state.hint}；未自动执行推理。`);
     return request;
   },
   get reasonState() { return { busy: requestBusy, pending: requestBusy && pendingTicket === epoch, error: errorTicket === epoch ? reasonError : undefined }; },
@@ -413,11 +426,11 @@ window.App = {
     if (!time || !["setup", "night", "day"].includes(time.phase) || (time.phase !== "setup" && (!Number.isInteger(time.number) || time.number < 1 || time.number > 99)) || rank(time) > rank(currentRequest.game.time)) throw new Error("请选择不晚于当前对局进度的有效时间。");
     if (list(currentRequest.facts).some((f) => f.type === "botc:global_assumption" && f.data?.kind === "role_absent" && f.data.role_id === roleId && rank(f.data.time) === rank(time))) throw new Error("这个时点已有相同角色不在场假设，请使用已有卡片的开关。");
     return mutateRequest((r) => {
-      r.facts.push({ id: uniqueId("a-global"), type: "botc:global_assumption", status: "reported", enabled: false, data: { kind: "role_absent", role_id: roleId, time: structuredClone(time), requested_enabled: true } });
+      r.facts.push({ id: uniqueId("a-global"), type: "botc:global_assumption", status: "reported", enabled: true, data: { kind: "role_absent", role_id: roleId, time: structuredClone(time), requested_enabled: true } });
     });
   },
   setGlobalAssumptionEnabled(id, enabled) {
-    return mutateRequest((r) => { const f = r.facts.find((v) => v.id === id && v.type === "botc:global_assumption"); if (!f) throw new Error("全局假设已不存在。"); f.data.requested_enabled = Boolean(enabled); f.enabled = false; });
+    return mutateRequest((r) => { const f = r.facts.find((v) => v.id === id && v.type === "botc:global_assumption"); if (!f) throw new Error("全局假设已不存在。"); f.enabled = Boolean(enabled); f.data.requested_enabled = Boolean(enabled); });
   },
   removeGlobalAssumption(id) {
     return mutateRequest((r) => { r.facts = r.facts.filter((f) => !(f.id === id && f.type === "botc:global_assumption")); });
@@ -502,7 +515,7 @@ window.App = {
       const existing = r.assumptions.find(matchesRole);
       const identityFact = !existing && r.facts.find((f) => f.type === "role" && ["reported", "confirmed"].includes(f.status) && matchesRole(f));
       const assumptionId = existing?.id || (!identityFact ? uniqueId("a-ability") : undefined);
-      r.facts.push({ id: factId, type: "botc:ability_observation", status: "confirmed", enabled: false, data: structuredClone(data), extensions: identityFact ? { "ui:identity_fact_id": identityFact.id } : { "ui:assumption_id": assumptionId } });
+      r.facts.push({ id: factId, type: "botc:ability_observation", status: "confirmed", enabled: true, data: structuredClone(data), extensions: identityFact ? { "ui:identity_fact_id": identityFact.id } : { "ui:assumption_id": assumptionId } });
       const transformed = data.role_id === "scarlet_woman" && (data.result?.value === "occurred" || (data.result?.value === "role" && data.result.role_id === "imp"));
       // 阶段结束状态：发动转化时已是小恶魔，女郎身份假设应落在前一阶段。
       const rank = window.PlayerActions.timeIndex(data.time), previous = Math.max(0, rank - 1);

@@ -113,6 +113,12 @@ def add_game_rules(
         _add_night_kills(solver, world)
     with rule_context(solver, "tb:day_rules", "白天规则", source=WIKI_URL):
         _add_day_rules(solver, world)
+    with rule_context(solver, "tb:ghost_votes", "每名死者整局仅一票", source="https://wiki.bloodontheclocktower.com/Rules_Explanation"):
+        for player in world.player_ids:
+            dead_ballots = [And(Not(world.alive_dawn[day][player]), world.voted[day][index][player])
+                            for day in world.days for index in world.nomination_ids]
+            if len(dead_ballots) > 1:
+                solver.add(AtMost(*dead_ballots, 1))
     with rule_context(solver, "tb:information", "信息类技能", source=WIKI_URL):
         _add_information(solver, world)
 
@@ -301,6 +307,13 @@ def _add_night_kills(solver: Solver, world: TroubleBrewingVars) -> None:
             for player in world.player_ids
         }
         any_minion = _or_all(list(living_minion.values()))
+        # A healthy Scarlet Woman takes precedence over other heirs at 5+ alive.
+        scarlet_ready = {
+            player: And(alive[player], role(player, Role.SCARLET_WOMAN),
+                        Not(world.is_droisoned(player, night))) for player in world.player_ids
+        }
+        scarlet_priority = And(Sum([If(alive[p], 1, 0) for p in world.player_ids]) >= 5,
+                               _or_all(list(scarlet_ready.values())))
         heirs = list(world.starpass_heir[night].values())
         for player in world.player_ids:
             solver.add(
@@ -309,6 +322,8 @@ def _add_night_kills(solver: Solver, world: TroubleBrewingVars) -> None:
                     And(self_kill_happens, living_minion[player]),
                 )
             )
+            solver.add(Implies(And(self_kill_happens, scarlet_priority),
+                               world.starpass_heir[night][player] == scarlet_ready[player]))
         solver.add(
             _count_eq(heirs, 1)
             == And(self_kill_happens, any_minion)
@@ -371,7 +386,7 @@ def _add_votes_and_virgin(solver: Solver, world: TroubleBrewingVars, day: int) -
         vote_totals.append(total)
         for player in players:
             solver.add(Implies(world.nominator[day][index][player], alive[player]))
-            solver.add(Implies(world.nominee[day][index][player], alive[player]))
+            # Dead players may be nominated; only the nominator must be alive.
     for player in players:
         ballots = [world.voted[day][index][player] for index in world.nomination_ids]
         if len(ballots) > 1:
@@ -781,7 +796,6 @@ def _scarlet_woman_proc(world: TroubleBrewingVars, day: int) -> BoolRef:
     demon_dies = [
         And(deaths[player], world.role_dawn[day][player][Role.IMP]) for player in players
     ]
-    others = alive_count - Sum([If(death, 1, 0) for death in deaths])
     ready = _or_all(
         [
             And(
@@ -794,7 +808,8 @@ def _scarlet_woman_proc(world: TroubleBrewingVars, day: int) -> BoolRef:
             for player in players
         ]
     )
-    return And(_or_all(demon_dies), ready, others >= 5)
+    # Five players immediately BEFORE the Demon dies, not five survivors.
+    return And(_or_all(demon_dies), ready, alive_count >= 5)
 
 
 def _first_nomination(world: TroubleBrewingVars, day: int, index: int, virgin: int) -> BoolRef:

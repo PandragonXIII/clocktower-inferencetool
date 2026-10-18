@@ -103,3 +103,6 @@ python main.py web --host 127.0.0.1 --port 8000
 
 ## OpenCode 配置
 [配置说明](.opencode/README.md)
+
+## 交接评审
+本轮实现与已知限制的最终交接说明见 [夜间评审与交接](docs/OVERNIGHT_REVIEW.md)。

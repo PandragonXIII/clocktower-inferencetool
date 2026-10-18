@@ -131,3 +131,54 @@ class AnalysisTests(unittest.TestCase):
         result = minimum_repairs([], [], [], Budget(), max_checks=0)
         self.assertFalse(result["complete"])
         self.assertEqual(result["optimality"], "unknown")
+
+
+class ProbabilityModePipelineTests(unittest.TestCase):
+    """概率模式只跳过 diagnose / role_ranges，显式查询、修复和世界枚举仍运行。"""
+
+    def test_sat_mode_keeps_queries_and_worlds_but_skips_diagnosis_and_ranges(self):
+        x = Bool("probability_mode_sat_x")
+        request = {"request_id": "request", "game": {"id": "game", "revision": 0,
+                   "players": [{"id": "p1", "seat": 1}]},
+                   "queries": [{"id": "query", "proposition": {"kind": "test"}}],
+                   "options": {"probability_mode": True, "max_worlds": 10}}
+        projection = [("p1", [("a", x), ("b", Not(x))])]
+        with patch("botc_reasoner.pipeline.diagnose") as diagnose:
+            result = analyze(request, SimpleNamespace(encoding_axioms=lambda: []),
+                             SimpleNamespace(records=[], catalog={}),
+                             [InputConstraint("public", x, "public")], lambda p: x,
+                             lambda s: [], projection)
+        diagnose.assert_not_called()
+        extensions = result["extensions"]
+        self.assertEqual(result["consistency"], "sat")
+        self.assertEqual(result["results"][0]["status"], "necessary")
+        self.assertNotIn("reasoner:role_ranges", extensions)
+        self.assertNotIn("trouble_brewing:possible_roles", extensions)
+        self.assertEqual(extensions["reasoner:diagnosis"], {})
+        worlds = extensions["reasoner:worlds"]
+        self.assertTrue(worlds["complete"])
+        self.assertEqual(worlds["total"], 1)
+
+    def test_unsat_mode_keeps_unsat_and_repairs_without_diagnosis(self):
+        x = Bool("probability_mode_unsat_x")
+        request = {"request_id": "request", "game": {"id": "game", "revision": 0,
+                   "players": [{"id": "p1", "seat": 1}]},
+                   "queries": [{"id": "query", "proposition": {"kind": "test"}}],
+                   "options": {"probability_mode": True, "max_repairs": 1}}
+        inputs = [InputConstraint("public", x, "public"),
+                  InputConstraint("claim", Not(x), owner_id="p1")]
+        with patch("botc_reasoner.pipeline.diagnose") as diagnose:
+            result = analyze(request, SimpleNamespace(encoding_axioms=lambda: []),
+                             SimpleNamespace(records=[], catalog={}), inputs,
+                             lambda p: x, lambda s: [], [])
+        diagnose.assert_not_called()
+        extensions = result["extensions"]
+        self.assertEqual(result["consistency"], "unsat")
+        self.assertEqual(result["results"][0]["status"], "inconsistent")
+        self.assertEqual(extensions["reasoner:diagnosis"], {})
+        self.assertNotIn("conflicts", result)
+        self.assertNotIn("reasoner:role_ranges", extensions)
+        repairs = extensions["reasoner:repairs"]
+        self.assertEqual(
+            repairs["general"]["candidates"][0]["removed_input_ids"], ["claim"]
+        )

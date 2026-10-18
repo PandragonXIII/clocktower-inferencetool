@@ -1,6 +1,6 @@
 "use strict";
 
-// 仅录入元数据，不是规则引擎；所有结果都保留为停用的观察记录。
+// 仅录入元数据，不是规则引擎；后端对部分技能结果提供结构化约束，自由文本/未支持的仅记录。
 window.ClocktowerSkills = (() => {
   const names = window.ClocktowerRoles.names;
   const group = (name) => window.ClocktowerRoles.groups.find((g) => g.name === name).roles.map(([id]) => id);

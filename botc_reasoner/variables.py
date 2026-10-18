@@ -889,12 +889,6 @@ class TroubleBrewingVars:
                 axioms.extend(_count_matches_flag(happened[index], nominators))
                 axioms.extend(_count_matches_flag(happened[index], nominees))
                 for player in self.player_ids:
-                    axioms.append(
-                        Implies(
-                            self.nominator[day][index][player],
-                            Not(self.nominee[day][index][player]),
-                        )
-                    )
                     axioms.append(Implies(self.voted[day][index][player], happened[index]))
             for player in self.player_ids:
                 _add_optional(

@@ -1,6 +1,6 @@
 "use strict";
 
-// 投票属于白天；禁用扩展只保存观察，不向引擎注入规则结论。
+// 投票属于白天；草稿禁用，结算记录参与推理。
 window.DayVoting = (() => {
   const el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
   const records = (facts) => (Array.isArray(facts) ? facts : []).filter((f) => f?.type === "botc:day_vote");
@@ -50,7 +50,7 @@ window.DayVoting = (() => {
     header.append(title, button("关闭（保留已保存记录）", close)); dialog.append(header);
     const result = settled ? d : defaultResult(request);
     dialog.append(el("p", `存活 ${result.alive_count} 人 · 阈值 ${result.threshold} 票（至少一半，向上取整）。${settled ? "结算时人数与阈值已保存。" : "以结算时存活人数为准。"}`, "round-status"));
-    dialog.append(el("p", "每轮独立计票；同一人多轮取最高票，不累加。不同人最高票相同则默认无人。允许手动覆盖及技能例外；这里只记录观察，尚未参与推理。", "hint"));
+    dialog.append(el("p", "每轮独立计票；最高票相同则默认无人。结算后提名、投票和处决均参与推理；手动覆盖若不符合规则会产生矛盾。", "hint"));
     const rounds = el("div", undefined, "vote-rounds"); dialog.append(rounds);
     if (!d.nominations.length) rounds.append(el("p", "暂无提名；也可直接结算为无人处决。", "empty"));
     d.nominations.forEach((n, i) => {

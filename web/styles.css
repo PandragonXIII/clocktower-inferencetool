@@ -10,6 +10,9 @@ header p { margin: 4px 0; color: #dddde9; }
 .header-bar { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
 .header-bar button { background: transparent; color: #fff; border-color: #77728d; border-radius: 8px; }
 .header-bar button:hover { background: #ffffff15; }
+.header-actions { display: flex; align-items: center; gap: 20px; }
+.header-actions .probability-switch { flex: none; white-space: nowrap; color: #fff; }
+.probability-switch:has(input:disabled) { opacity: .55; cursor: not-allowed; }
 #notice:empty, #notice:not(.error) { display: none; }
 #notice.error { margin: 0 0 16px; }
 .eyebrow { font-size: .75rem; letter-spacing: .16em; }

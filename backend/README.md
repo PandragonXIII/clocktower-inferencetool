@@ -12,7 +12,7 @@
 | --- | --- |
 | `http_server.py` | 基于标准库 `http.server` 的同源服务：提供 `web/` 静态文件与 `/api/` JSON API。 |
 | `validation.py` | `POST /api/v1/reason` 的运行时校验（形状、类型、跨集合 id 唯一、引用、时间、未知类型）；对已知扩展事实委派给 `extension_validation.py`。 |
-| `extension_validation.py` | 三类已知 BOTC 扩展事实（`botc:ability_observation`、`botc:night_deaths`、`botc:day_vote`）的 `data` 结构与语义校验。 |
+| `extension_validation.py` | 四类已知 BOTC 扩展事实（`botc:ability_observation`、`botc:night_deaths`、`botc:day_vote`、`botc:global_assumption`）的 `data` 结构与语义校验。 |
 | `errors.py` | `ApiError`：协议级 HTTP 错误（status + code + message + JSON Pointer path）。 |
 | `adapter.py` | 适配器契约 `ReasoningAdapter`、请求分类 `prepare_request`、占位实现 `PlaceholderAdapter`。 |
 
@@ -89,6 +89,7 @@ curl -sS http://127.0.0.1:8000/api/v1/capabilities
 - 校验或服务失败返回 `4xx`/`5xx`，响应体含 `error: { code, message, path }`，`path` 为 JSON Pointer。
 - **逻辑 `unsat` 不是错误**：它返回 `200` 且 `consistency: "unsat"`。
 - 传输层：缺 `Content-Length` → `411`；超过 1 MiB → `413`；非 `application/json` → `415`；读取超时 → `408`；未知 `/api/` 路径 → `404`；方法不符 → `405`（带 `Allow`）。
+- socket 的 10 秒超时仅约束读取请求体与写出响应，不限制适配器内的同步推理计算。
 - 解析拒绝重复 JSON 键与 `NaN`/`Infinity`。
 
 详见 [协议文档的“当前 HTTP 实现与框架行为”](../web/protocol/README.md#当前-http-实现与框架行为)。
@@ -97,22 +98,20 @@ curl -sS http://127.0.0.1:8000/api/v1/capabilities
 
 `validation.py` 在分发扩展事实时按 `enabled` 与是否已知分别处理：
 
-- **已知且 `enabled: true`**：交由 `extension_validation.validate_extension_data` 校验 `data`。当前已知三类（`KNOWN_EXTENSIONS`）：
-  - `botc:ability_observation`：技能观察。需 `time`（`phase`/正数 `number`）、`actor_id`、`role_id`（须为暗流涌动角色 id）、`targets`（玩家 id 数组）、`result.kind`（`unobserved` / `no_outsiders` / `no_direct_result` / `role` / `number` / `text` / `choice`）及对应字段。仅支持部分角色与结果组合，其余角色返回 `422`（见下）。
-  - `botc:night_deaths`：夜间死亡。需 `time.phase == "night"`、`player_ids`（玩家 id 数组）、`result`（`"deaths"` / `"none"`，`"none"` 时列表必须为空）。首夜死亡当前返回 `422`。
-  - `botc:day_vote`：白天处决。需 `time.phase == "day"`、`stage`（`"voting"` / `"settled"`）、`execution.player_id`（无人处决为 `null`），可选 `alive_count`/`threshold`/`highest_count`/`override`/`default_player_id`/`nominations`。`nominations` 仅做记录用途，不代表完整投票推理。
+- **已知且 `enabled: true`**：交由 `extension_validation.validate_extension_data` 校验 `data`。当前已知四类（`KNOWN_EXTENSIONS`）：
+  - `botc:ability_observation`：技能观察。需 `time`（`phase`/正数 `number`）、`actor_id`、`role_id`（须为暗流涌动角色 id）、`targets`（玩家 id 数组）、`result.kind`（`unobserved` / `no_outsiders` / `no_direct_result` / `role` / `number` / `text` / `choice`）及对应字段。已建模角色走结构化校验；其余角色委派 `_passive_ability` 仅校验形状与取值（可保存自由文本或未指定事件的备注），不代表会生成约束。
+  - `botc:night_deaths`：夜间死亡。需 `time.phase == "night"`、`player_ids`（玩家 id 数组）、`result`（`"deaths"` / `"none"`，`"none"` 时列表必须为空）。首夜（`number == 1`）只接受无人死亡；首夜出现死者返回 `422`。
+  - `botc:day_vote`：白天处决与投票。需 `time.phase == "day"`、`stage`（`"voting"` / `"settled"`），可选 `execution.player_id`（无人处决为 `null`，`settled` 时必须给出 `execution`）、`alive_count`/`threshold`/`highest_count`/`override`/`default_player_id`/`nominations`。`nominations` 每条需 `id`（不重复）、`nominator_id`、`nominee_id`、`voter_ids`（不重复），可选 `count`（须等于 `voter_ids` 长度）；`voting` 与 `settled` 均接受，未结算草稿可保存。
+  - `botc:global_assumption`：全局假设。需 `kind == "role_absent"`、`role_id`、`time`（`setup` 时只能有 `phase`；`day`/`night` 需正数 `number` 且不晚于 `game.time`），可选 `requested_enabled`（若给出须为布尔值）。
 - **`enabled: false`**：**不解析 `data`**，任意内容均可保存（可为前端未完成草稿）。
 - **未知且 `enabled: true`**：仍然拒绝，`UNKNOWN_TYPE` `400`（不静默忽略）。
 
 ### 400 非法格式 / 引用 vs 422 当前不支持
 
-- **`400 INVALID_REQUEST` / `INVALID_REFERENCE` 等**：`data` 结构非法或引用不存在（如未知玩家、未知角色、时间晚于 `game.time`、字段类型错误、`time.number` 为布尔）。`path` 为 JSON Pointer。
-- **`422 UNSUPPORTED_OBSERVATION`**：结构合法但**当前模型尚不支持**，例如：
-  - `botc:ability_observation` 中 `role_id` 不在转换层已支持集合内；
-  - `botc:day_vote` 的 `stage != "settled"`（投票尚未结算）——此类草稿应保存在 `enabled: false` 下；
-  - `botc:night_deaths` 的首夜死亡。
+- **`400 INVALID_REQUEST` / `INVALID_REFERENCE` 等**：`data` 结构非法或引用不存在（如未知玩家、未知角色、时间晚于 `game.time`、字段类型错误、`time.number` 为布尔、未知全局假设 `kind`、投票 `nomination.count` 与 `voter_ids` 长度不符）。`path` 为 JSON Pointer。
+- **`422 UNSUPPORTED_OBSERVATION`**：结构合法但**当前模型尚不支持**。当前主要剩下 `botc:night_deaths` 的首夜出现死者（`number == 1` 且有 `player_ids`）。未结算投票（`stage != "settled"`）与多数此前不支持的角色观察现在会通过校验：前者只约束已录入提名槽、不约束最终处决，后者委派 `_passive_ability` 或由转换层做部分转换；它们是否真正生成约束由转换层决定。
 
-`422` 表示**语义合法但本模型无法处理**，不是格式错误。校验层只判断结构与引用；是否真正产生约束仍取决于转换层，**不支持不等于已支持**。
+`422` 表示**语义合法但本模型无法处理**，不是格式错误。校验层只判断结构与引用；是否真正产生约束仍取决于转换层，**不支持不等于已支持**。实际参与情况见响应 `extensions["reasoner:participation"]`。
 
 ## 适配器契约
 
@@ -169,6 +168,12 @@ httpd.serve_forever()
 双层分析使用的 `reasoner:scope/source/owner_id` 元数据由 `validation.py` 校验；只有 confirmed 事实允许显式 public，假设只能 conditional，owner 必须引用玩家。禁用事实不解析技能载荷，但仍校验元数据。
 
 分析选项还包括 `total_timeout_ms`（1..60000）、`max_worlds`（0..100）、`max_repairs`（0..10）、`max_repair_checks`（1..1024）。默认值、预算边界与结果扩展见[协议说明](../web/protocol/README.md#双层分析与高级结果)。编译和分析由 `connector.py` 与 `botc_reasoner/pipeline.py` 执行。
+
+概率模式另有两个选项，由 `validation.py` 一并校验：`probability_mode` 必须是布尔（`/options/probability_mode`），`probability_timeout_ms` 必须是 `1..300000` 的整数（范围外或布尔值返回 `400`）。`probability_mode:true` 时连接器另起独立预算运行概率估计，写入 `reasoner:probabilities`；校验层只判类型与范围，不运行估计。
+
+概率估计的条件方式以 input 的 `scope` 为准：`public` 输入是硬条件，其他启用输入按 `owner_id` 分组、以可信度 `0.7` 采信并枚举组合。因此校验层不额外要求输入一律为 hard；它只保证 `reasoner:scope/source/owner_id` 元数据合法。用户输入之间矛盾时逻辑 `consistency` 可为 `unsat`，概率仍可能为 `estimated`；public 背景矛盾时概率为 `inconsistent`。详见[协议说明](../web/protocol/README.md#概率估计reasonerprobabilities)。
+
+真实适配器在每次成功分析后写入 `extensions["reasoner:timings"]`（`build_ms` / `analysis_ms` / `probability_ms` / `total_ms`）。这些是适配器内部的单调时钟实测值：`TroubleBrewingAdapter` 用单把锁串行化请求，**等待这把锁的时间不计入任何阶段**，HTTP 传输时间也不计入；它们只是观测数据，不是预算、超时或结论的一部分。
 
 后端测试见 [`../tests/test_backend.py`](../tests/test_backend.py)，覆盖真实临时 HTTP 请求、校验拒绝、路由/传输错误，以及注入 fake adapter 模拟 `sat`/`unsat`/异常。运行：
 

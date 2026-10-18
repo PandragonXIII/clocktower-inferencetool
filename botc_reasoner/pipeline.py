@@ -4,12 +4,14 @@ from z3 import sat, unsat
 
 from .analysis import Budget, build_solver, check_scope, diagnose, query_status
 from .inputs import input_metadata
+from .participation import describe_participation
 from .repairs import minimum_repairs
 from .worlds import enumerate_worlds
 
 
 def analyze(request, world, collector, inputs, query_expr, model_assignments, projection):
     options = request.get("options", {})
+    probability_mode = options.get("probability_mode", False)
     budget = Budget(options.get("total_timeout_ms", 8000), options.get("timeout_ms", 1000))
     domain = list(world.encoding_axioms())
     public = [item for item in inputs if item.scope == "public"]
@@ -50,12 +52,15 @@ def analyze(request, world, collector, inputs, query_expr, model_assignments, pr
                   "reasoner:inputs": input_metadata(inputs), "reasoner:conclusions": conclusions,
                   "reasoner:rule_catalog": catalog}
     response["extensions"] = extensions
+    extensions["reasoner:participation"] = describe_participation(request, inputs)
     if model is not None:
         response["model"] = model
     if response["consistency"] == "unknown":
         response["reason"] = budget.reason or "未能完成条件背景的一致性判断"
     diagnoses = {}
     for name, selected in (("public", public), ("conditional", inputs)):
+        if probability_mode:
+            continue
         if scopes[name]["consistency"] != "unsat":
             continue
         diagnostic = diagnose(domain, collector.records, selected, budget)
@@ -75,7 +80,7 @@ def analyze(request, world, collector, inputs, query_expr, model_assignments, pr
                                   max_checks=options.get("max_repair_checks", 128))
             for name, identity_only in (("identity", True), ("general", False))
         }
-    if response["consistency"] == "sat":
+    if response["consistency"] == "sat" and not probability_mode:
         rows = []
         for player_id, roles in projection:
             proven, excluded, pending = [], [], []

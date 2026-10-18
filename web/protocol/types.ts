@@ -135,19 +135,34 @@ export interface NightDeathsData {
   result: "deaths" | "none";
 }
 
+// 当前唯一的全局假设：所选时点全体玩家真实身份均非该角色。
+// 不排除酒鬼拿到该镇民标记；enabled 是唯一参与开关。
+export interface GlobalAssumptionData {
+  kind: "role_absent";
+  role_id: string;
+  time: Time;
+  requested_enabled?: boolean; // 兼容旧 UI 的记录字段，不覆盖 enabled。
+}
+
+export interface ReasonerParticipation {
+  id: string;
+  status: "applied" | "partial" | "record_only" | "disabled";
+  reason: string;
+}
+
 export interface DayVoteData {
   // 必须为 day。
   time: { phase: "day"; number: number };
-  // voting 表示投票未结算，当前模型不支持，应以 enabled:false 保存。
+  // voting 仅约束已有提名，不封闭后续槽；UI 草稿默认禁用。
   stage: "voting" | "settled";
   // 被处决者；无人处决为 null。
-  execution: { player_id: string | null };
+  execution: { player_id: string | null } | null;
   alive_count?: number;
   threshold?: number;
   highest_count?: number;
   override?: boolean;
   default_player_id?: string | null;
-  // 仅作记录用途，不代表完整投票推理。
+  // 按数组顺序映射提名槽及逐人投票，参与贞洁者、管家、处决规则。
   nominations?: {
     id: string;
     nominator_id: string;
@@ -182,6 +197,44 @@ export interface Options {
   max_repairs?: number;
   // 每类修复搜索的求解次数上限，默认 128，1..1024。
   max_repair_checks?: number;
+  // 概率模式不改变逻辑条件，仅增加初始身份的带权抽样估计。
+  probability_mode?: boolean;
+  // 独立概率分析预算，默认 120000，1..300000 毫秒。
+  probability_timeout_ms?: number;
+}
+
+export interface ReasonerProbabilities {
+  status: "estimated" | "unknown" | "inconsistent";
+  method: "weighted_sampling";
+  scope: "conditional";
+  // public 输入为硬条件，其他启用输入按 owner 组以 0.7 伯努利采信后枚举组合。
+  conditioning: "public_with_soft_conditional_inputs";
+  credibility: number;
+  time: { phase: "setup" };
+  complete: false;
+  seed: number;
+  input_ids: string[];
+  hard_input_ids: string[];
+  soft_input_ids: string[];
+  // total：全部组合数；checked：已检查；estimated：可行且完成估计；
+  // complete：是否枚举了全部组合（不是概率的完整性保证）。
+  groups: { total: number; checked: number; estimated: number; complete: boolean };
+  // 抽样元数据：每个采信组合的目标接受样本数与最大尝试次数。
+  target_accepted_per_group: number;
+  max_trials_per_group: number;
+  rows: { player_id: string; seat: number; probabilities: Record<string, number> }[];
+  description: string;
+  reason?: string;
+}
+
+// 连接器一次请求内各阶段的实测耗时（毫秒），用于本地性能对比。
+// 不含等待适配器锁的时间与 HTTP 传输时间。
+export interface ReasonerTimings {
+  build_ms: number;
+  analysis_ms: number;
+  probability_ms: number;
+  total_ms: number;
+  excludes: string[];
 }
 
 // 以下类型说明 reasoner:* 扩展；运行时仍由后端校验。

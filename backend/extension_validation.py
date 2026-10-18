@@ -7,7 +7,7 @@ drafts. No Z3 objects are imported or constructed by this module.
 from .errors import ApiError
 
 KNOWN_EXTENSIONS = {
-    "botc:ability_observation", "botc:night_deaths", "botc:day_vote",
+    "botc:ability_observation", "botc:night_deaths", "botc:day_vote", "botc:global_assumption",
 }
 TOWNSFOLK = {
     "washerwoman", "librarian", "investigator", "chef", "empath",
@@ -84,6 +84,19 @@ def known_role(value, path, allowed=ROLES):
 
 def validate_extension_data(kind, data, path, player_ids, game_rank):
     data = obj(data, path)
+    if kind == "botc:global_assumption":
+        if data.get("kind") != "role_absent":
+            fail(path + "/kind", "未知全局假设", "UNKNOWN_TYPE")
+        known_role(data.get("role_id"), path + "/role_id")
+        time = obj(data.get("time"), path + "/time")
+        if time.get("phase") == "setup":
+            if set(time) != {"phase"}:
+                fail(path + "/time", "setup 不能带 number 或其他字段")
+        else:
+            time_value(time, path + "/time", game_rank)
+        if "requested_enabled" in data and type(data["requested_enabled"]) is not bool:
+            fail(path + "/requested_enabled", "必须是布尔值")
+        return
     phase, number = time_value(data.get("time"), path + "/time", game_rank)
     if kind == "botc:night_deaths":
         if phase != "night":
@@ -106,12 +119,11 @@ def _day_vote(data, path, players, phase):
         fail(path + "/time/phase", "处决记录必须使用 day")
     if data.get("stage") not in ("voting", "settled"):
         fail(path + "/stage", "必须是 voting 或 settled")
-    if data["stage"] != "settled":
-        unsupported(path + "/stage", "未结算的投票只能作为禁用草稿保存")
-    execution = obj(data.get("execution"), path + "/execution")
-    if "player_id" not in execution:
-        fail(path + "/execution/player_id", "必须指定被处决者；无人处决用 null")
-    reference(execution["player_id"], path + "/execution/player_id", players, True)
+    if data["stage"] == "settled" or data.get("execution") is not None:
+        execution = obj(data.get("execution"), path + "/execution")
+        if "player_id" not in execution:
+            fail(path + "/execution/player_id", "必须指定被处决者；无人处决用 null")
+        reference(execution["player_id"], path + "/execution/player_id", players, True)
     for key in ("alive_count", "threshold", "highest_count"):
         if key in data:
             integer(data[key], path + "/" + key)
@@ -122,6 +134,8 @@ def _day_vote(data, path, players, phase):
     nominations = data.get("nominations", [])
     if not isinstance(nominations, list):
         fail(path + "/nominations", "必须是数组")
+    if len(nominations) > len(players):
+        unsupported(path + "/nominations", "当前模型每天提名槽不超过玩家数")
     seen = set()
     for i, nomination in enumerate(nominations):
         p = f"{path}/nominations/{i}"
@@ -160,8 +174,6 @@ def _ability(data, path, players, phase, number):
             known_role(result["role_id"], path + "/result/role_id")
     elif kind == "text" and not isinstance(result.get("text"), str):
         fail(path + "/result/text", "必须是字符串")
-    if kind == "unobserved":
-        return  # Explicitly no observed result, so intentionally no constraint.
     role = data["role_id"]
     supported = {
         "washerwoman", "librarian", "investigator", "chef", "empath",
@@ -169,7 +181,8 @@ def _ability(data, path, players, phase, number):
         "butler", "slayer", "ravenkeeper",
     }
     if role not in supported:
-        unsupported(path + "/role_id", "当前转换层尚不能求解该角色的观察记录")
+        _passive_ability(data, path, players, phase, kind)
+        return
     if phase != ("day" if role == "slayer" else "night"):
         fail(path + "/time/phase", "技能时间阶段不匹配")
     if role in {"washerwoman", "librarian", "investigator", "chef"} and number != 1:
@@ -184,6 +197,8 @@ def _ability(data, path, players, phase, number):
     }
     if len(data["targets"]) not in target_counts[role]:
         fail(path + "/targets", "此技能的目标数量不正确")
+    if kind == "unobserved":
+        return  # No readout constraint; known action targets may still be compiled.
     expected = {
         "washerwoman": "role", "librarian": "no_outsiders" if kind == "no_outsiders" else "role",
         "investigator": "role", "chef": "number", "empath": "number",
@@ -202,3 +217,37 @@ def _ability(data, path, players, phase, number):
         allowed = {"yes", "no"} if role == "fortune_teller" else {"died", "survived"}
         if result["value"] not in allowed:
             fail(path + "/result/value", "技能结果取值不匹配")
+
+
+def _passive_ability(data, path, players, phase, kind):
+    """Validate UI observations, including explicitly unstructured notes."""
+    role, result, targets = data["role_id"], data["result"], data["targets"]
+    counts = {"virgin": (1, 1), "soldier": (0, 0), "mayor": (0, len(players)),
+              "drunk": (0, 0), "recluse": (0, 0), "saint": (0, 0),
+              "spy": (0, len(players)), "scarlet_woman": (0, 0), "baron": (0, 0)}
+    minimum, maximum = counts[role]
+    if not minimum <= len(targets) <= maximum:
+        fail(path + "/targets", "此技能的目标数量不正确")
+    if role == "virgin" and phase != "day":
+        fail(path + "/time/phase", "贞洁者提名观察必须在白天")
+    if kind == "unobserved":
+        return
+    if role == "drunk":
+        if kind != "role":
+            fail(path + "/result/kind", "酒鬼观察应为表象镇民身份")
+        known_role(result["role_id"], path + "/result/role_id", TOWNSFOLK)
+    elif role == "spy":
+        if kind != "text" or not result["text"].strip():
+            fail(path + "/result", "请填写魔典文本或选择未观察到结果")
+    elif role == "baron":
+        if kind != "number" or result["value"] > len(players):
+            fail(path + "/result", "外来者数量必须为玩家数以内的非负整数")
+    else:
+        choices = {"virgin": {"executed", "not_executed"}, "soldier": {"died", "survived"},
+                   "mayor": {"three_alive_no_execution_win", "suspected_redirect"},
+                   "recluse": {"role", "alignment"}, "saint": {"good_lost", "good_won", "ongoing"},
+                   "scarlet_woman": {"occurred", "not_occurred", "role"}}
+        if kind != "choice" or result.get("value") not in choices[role]:
+            fail(path + "/result", "技能结果格式或取值不匹配")
+        if role == "scarlet_woman" and result["value"] == "role" and result.get("role_id") != "imp":
+            fail(path + "/result/role_id", "暗流涌动红唇女郎转化为小恶魔")

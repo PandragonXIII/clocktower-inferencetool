@@ -1,8 +1,40 @@
 # 测试说明
 
+`test_frontend_conditions.py` 使用前端实际记录形状验证四类扩展，检查全局缺席进入真实求解器、目标选择的健康守卫、存活负结果、酒鬼标记和提名／投票槽；`test_extension_validation.py` 另通过真实 HTTP 验证全局假设进入条件层并产生正常 unsat。
+
+## 概率适配器测试（`test_probability_adapter.py`）
+
+覆盖 `botc_reasoner.probability_adapter.analyze_probabilities` 与连接器的开关语义，mock `estimate_role_probabilities` 以避免实际抽样：
+
+- **public 硬条件 + conditional 软采信**：public 输入在每个组合的 solver 中都存在；conditional 输入按 `owner_id` 分组（无归属各自成组），每组以 0.7 伯努利采信并枚举组合，权重为 `0.7^采信 × 0.3^忽略`，结果按权重归一化。测试验证采信/忽略两个组合都被调用、概率约为 0.7/0.3，且 `hard_input_ids`/`soft_input_ids`/`conditioning`/`credibility`/`groups` 回显正确。
+- **矛盾输入仍可估计**：同一归属组内的矛盾 role/alignment 表达式、跨组的 role/alignment/global 矛盾（如 `BoolVal(False)`）只让相应组合权重为 0，剩余组合继续估计，`status` 为 `estimated`，不会因 conditional 冲突报 `inconsistent`。
+- 估计返回 `None` 或抛 `ProbabilityIncomplete` 时结果保持 `unknown`（绝不标 `impossible`）并带 `reason`。
+- **public 背景 `unsat`** 报 `inconsistent` 且不调用估计器。
+- `rows` 回显每位玩家的 `player_id`/`seat` 与角色 id 字符串。
+- 关闭或缺少 `probability_mode` 时不导入/调用适配器；开启时按 `probability_timeout_ms`/`timeout_ms` 构造 `Budget` 并回写 `reasoner:probabilities`（mock `connector.analyze` / `_prepare_context` / `_projection`）。
+- `backend.validation`：`probability_mode` 必须为布尔，`probability_timeout_ms` 必须是 `1..300000` 的整数（布尔拒绝）；连接器默认 `120000`，可被显式值覆盖。
+- `test_extension_validation.py` 的真实 HTTP 概率用例把五条全钉身份标为 `reasoner:scope:"public"`，验证唯一组合、`estimated`、每行归一化且钉定角色为 1.0。
+
 `tests/` 下的测试均由顶层 `main.py test` 统一运行。
 
-双层分析与来源测试见 `test_analysis.py`、`test_inputs.py`、`test_provenance.py`；预算及元数据校验见 `test_analysis_validation.py`；最少撤回和联合投影枚举见 `test_repairs.py`、`test_worlds.py`。覆盖公共结论不受条件冲突污染、unknown 不误排身份、最优代价与方案完整性分开、public 不撤回以及投影去重。
+## 概率推理小 benchmark（`benchmark_probability.py`）
+
+可复现的性能脚本，**不是 unittest**，也不 mock 连接器或求解器：它用 `create_server(..., adapter=TroubleBrewingAdapter())` 在 `127.0.0.1` 的随机端口启动线程，通过 `urllib` 以 120 秒读取超时向真实 `/api/v1/reason` 发送同一份 5 人请求。输入含 5 条启用的 `reported` 角色声明（p1 与 p3 都自称厨师，全部采信时与角色唯一性冲突），无查询；两次请求只有概率开关不同，选项均为 `timeout_ms=10000`、`total_timeout_ms=8000`、`probability_timeout_ms=120000`。脚本打印每轮的 `timings`、`consistency`、概率 `status`、`groups` 与按角色排序并保留 4 位小数的 `rows`（附每行概率和）；超过 120 秒时该轮记为 `unknown`（超时不是逻辑结论）。
+
+```sh
+.venv/bin/python tests/benchmark_probability.py
+```
+
+本机实测（一次代表运行，耗时随机器/负载变化）：
+
+| 轮次 | consistency | 概率 status | groups | HTTP 总耗时 | build_ms | analysis_ms | probability_ms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `probability_mode:false` | `unsat` | 未请求 | — | 2.324 s | 969.6 | 1303.4 | 0.0 |
+| `probability_mode:true` | `unsat` | `estimated` | total 32 / checked 32 / estimated 24 / complete true | 4.808 s | 877.3 | 940.8 | 2981.6 |
+
+两轮逻辑结果都是 `unsat`（两名厨师声明不能同时为真）；概率模式仍按组合排除矛盾并给出 `estimated`，每行概率和为 1，未出现超时或 `unknown`。
+
+双层分析与来源测试见 `test_analysis.py`、`test_inputs.py`、`test_provenance.py`；预算及元数据校验见 `test_analysis_validation.py`；最少撤回和联合投影枚举见 `test_repairs.py`、`test_worlds.py`。覆盖公共结论不受条件冲突污染、unknown 不误排身份、最优代价与方案完整性分开、public 不撤回以及投影去重。`test_analysis.py` 的 `ProbabilityModePipelineTests` 另验证概率模式下 `pipeline.analyze` 跳过 `diagnose` 与 `role_ranges`，但保留显式查询、`max_repairs` 修复、`max_worlds` 世界枚举，以及真实 `unsat` 的 `consistency`/`results` 与修复结论。
 
 ## 推理模型 smoke 测试（`test_reasoner_smoke.py`）
 
@@ -69,3 +101,7 @@
 cd /tmp
 /home/jing/repo/hackathon/.venv/bin/python /home/jing/repo/hackathon/main.py test
 ```
+
+## 模拟对局记录（`simulate-games/`）
+
+[`simulate-games/`](simulate-games/README.md) 存放主代理主持 + 隔离代理决策的文字模拟对局，**不由** `main.py test` 运行，也**不是**推理引擎的输出或能力验证；直接阅读各局 `overview.md` 即可。当前有 [`game1-5p/`](simulate-games/game1-5p/README.md)（暗流涌动 5 人局）和 [`game2-7p/`](simulate-games/game2-7p/README.md)（暗流涌动 7 人局，两夜两昼，含恶魔继承、保护与鬼票）。五人局的 `d2.json` 是空占位，不是可用的 JSON 示例请求；七人局附 12 份逐时刻完整网页请求 JSON，校验方式见其 README。

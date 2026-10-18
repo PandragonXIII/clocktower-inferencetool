@@ -189,7 +189,7 @@ class RejectedExtensionFactTests(unittest.TestCase):
         request = with_facts(night_deaths_fact(data={"result": "maybe"}))
         self._assert_rejected(request, path="/facts/0/data/result")
 
-    def test_unsupported_spy_observation_is_422(self):
+    def test_spy_observation_requires_text_or_unobserved(self):
         request = with_facts(
             chef_fact(
                 data={
@@ -200,7 +200,7 @@ class RejectedExtensionFactTests(unittest.TestCase):
                 }
             )
         )
-        self._assert_rejected(request, status=422, code="UNSUPPORTED_OBSERVATION")
+        self._assert_rejected(request, status=400, code="INVALID_REQUEST")
 
     def test_unknown_result_role_is_rejected(self):
         request = with_facts(
@@ -255,9 +255,9 @@ class RejectedExtensionFactTests(unittest.TestCase):
             path="/facts/0/data/nominations/0/voter_ids/1",
         )
 
-    def test_unsettled_voting_is_unsupported(self):
+    def test_unsettled_voting_is_accepted_as_partial_nominations(self):
         request = with_facts(day_vote_fact(data={"stage": "voting"}))
-        self._assert_rejected(request, status=422, code="UNSUPPORTED_OBSERVATION")
+        self.assertIs(validate_request(request), request)
 
     def test_disabled_fact_with_null_data_is_accepted(self):
         request = with_facts(
@@ -458,8 +458,8 @@ class ExtensionHttpTests(unittest.TestCase):
             chef_fact(
                 data={
                     "actor_id": "p1",
-                    "role_id": "spy",
-                    "targets": [],
+                    "role_id": "monk",
+                    "targets": ["p2"],
                     "result": {"kind": "no_direct_result"},
                 }
             )
@@ -525,6 +525,71 @@ class RealAdapterHttpTests(unittest.TestCase):
         body = json.loads(payload.decode("utf-8"))
         self.assertEqual(body["extensions"]["adapter:mode"], "trouble_brewing")
         self.assertIn(body["consistency"], ("sat", "unknown"))
+
+    def test_global_absence_is_rejected_by_actual_rules_not_http(self):
+        import connector
+
+        request = with_facts({"id": "global-no-imp", "type": "botc:global_assumption",
+                              "status": "reported", "enabled": True,
+                              "data": {"kind": "role_absent", "role_id": "imp", "time": {"phase": "setup"}}})
+        request["game"]["time"] = {"phase": "setup"}
+        request["assumptions"] = []
+        request["queries"] = []
+        request["options"] = {"timeout_ms": 1000, "total_timeout_ms": 4000}
+        with mock.patch.object(connector, "_projection", return_value=[]):
+            status, payload = self._post(request)
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertEqual(body["consistency"], "unsat")
+        scopes = body["extensions"]["reasoner:scopes"]
+        self.assertEqual(scopes["public"]["consistency"], "sat")
+        self.assertIn("global-no-imp", scopes["conditional"]["input_ids"])
+        self.assertEqual(body["extensions"]["reasoner:participation"][0]["status"], "applied")
+
+    def test_probability_mode_runs_actual_estimator_over_http(self):
+        import connector
+
+        request = base_request()
+        roles = ["imp", "poisoner", "chef", "soldier", "washerwoman"]
+        request["facts"] = [{"id": f"pinned-{i}", "type": "role", "enabled": True, "status": "confirmed",
+                             "extensions": {"reasoner:scope": "public"},
+                             "proposition": {"kind": "role", "player_id": f"p{i+1}", "role_id": role,
+                                             "time": {"phase": "setup"}}} for i, role in enumerate(roles)]
+        request["assumptions"] = []
+        request["queries"] = []
+        request["game"]["time"] = {"phase": "setup"}
+        request["options"] = {"probability_mode": True, "probability_timeout_ms": 5000,
+                              "timeout_ms": 1000, "total_timeout_ms": 3000}
+        with mock.patch.object(connector, "_projection", return_value=[]):
+            status, payload = self._post(request)
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertEqual(body["consistency"], "sat")
+        probabilities = body["extensions"]["reasoner:probabilities"]
+        self.assertEqual(probabilities["status"], "estimated")
+        self.assertFalse(probabilities["complete"])
+        self.assertEqual(probabilities["hard_input_ids"], [f"pinned-{i}" for i in range(5)])
+        self.assertEqual(probabilities["soft_input_ids"], [])
+        self.assertEqual(probabilities["groups"]["total"], 1)
+        self.assertEqual(probabilities["groups"]["estimated"], 1)
+        for row, role in zip(probabilities["rows"], roles):
+            self.assertEqual(list(row["probabilities"]), [role])
+            self.assertAlmostEqual(row["probabilities"][role], 1.0)
+            self.assertAlmostEqual(sum(row["probabilities"].values()), 1.0)
+
+        request["assumptions"] = [
+            {"id": f"opposite-{alignment}", "enabled": True,
+             "proposition": {"kind": "alignment", "player_id": "p1", "alignment": alignment,
+                             "time": {"phase": "setup"}}} for alignment in ("good", "evil")]
+        with mock.patch.object(connector, "_projection", return_value=[]):
+            status, payload = self._post(request)
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertEqual(body["consistency"], "unsat")
+        probabilities = body["extensions"]["reasoner:probabilities"]
+        self.assertEqual(probabilities["status"], "estimated")
+        self.assertTrue(probabilities["groups"]["complete"])
+        self.assertEqual(probabilities["rows"][0]["probabilities"], {"imp": 1.0})
 
 
 class ConnectorCapabilitiesShapeTests(unittest.TestCase):

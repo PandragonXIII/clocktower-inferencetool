@@ -65,7 +65,7 @@ window.PlayerActions = (() => {
     if (!observations.length) body.append(el("p", "暂无动作记录", "empty"));
     observations.forEach((f) => {
       const block = el("div", undefined, "evidence");
-      block.append(el("p", `${window.ClocktowerSkills.all.find((s) => s.id === f.data.ability_id)?.name || f.data.ability_id} · ${timeName(f.data.time)}`), el("p", "已记录，技能结果尚未参与推理", "warning"));
+      block.append(el("p", `${window.ClocktowerSkills.all.find((s) => s.id === f.data.ability_id)?.name || f.data.ability_id} · ${timeName(f.data.time)}`), el("p", f.enabled ? "已启用，结构化部分在下次推理作为约束；自由文本或未支持的结果仅记录，不参与约束。" : "已停用，不参与推理。", "warning"));
       const raw = el("details"); raw.append(el("summary", "目标、结果、备注及完整数据"), el("pre", JSON.stringify(f, null, 2))); block.append(raw);
       block.append(button("删除动作（保留共用身份）", () => mutate(() => window.App.removeAbility(f.id)))); body.append(block);
     });
@@ -114,7 +114,7 @@ window.PlayerActions = (() => {
     const updatePreview = () => {
       if (ability) {
         const role = skill?.role_id;
-        preview.textContent = role ? `对应身份：${names[role]}。保存时优先复用同一玩家已有的有效身份假设或声明，不重复创建；没有时才添加假设。取消不保存，技能结果不参与推理。` : "请选择后预览身份假设。";
+        preview.textContent = role ? `对应身份：${names[role]}。保存时优先复用同一玩家已有的有效身份假设或声明，不重复创建；没有时才添加假设。取消不保存；保存后结构化结果在下次推理作为约束，自由文本或未支持的结果仅记录。` : "请选择后预览身份假设。";
         return;
       }
       if (kindSelect.value === "alignment") preview.textContent = `将假设该玩家为${alignmentSelect.value === "good" ? "善良" : "邪恶"}阵营。仅为临时假设，不是已确认阵营，也不会据此推断身份。`;

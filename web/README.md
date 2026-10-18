@@ -18,7 +18,9 @@
 
 ## 当前推理接口兼容性
 
-已同步 Engine 的来源感知双范围推理：启用的 `reported` 声明作为可撤销条件输入参与 conditional 推理，不再被忽略；`confirmed` 也不一概等同 public，来源和 scope 的完整说明见协议与转换层文档。本节取代下文旧的“reported 不参与推理”描述。已有身份声明仍保留问号，不能当作客观事实。原有停用技能、死亡、投票及全局扩展仍不会自动启用，需要后续按后台支持范围逐项接入。
+已同步 Engine 的来源感知双范围推理：启用的 `reported` 声明作为可撤销条件输入参与 conditional 推理，不再被忽略；`confirmed` 也不一概等同 public，来源和 scope 的完整说明见协议与转换层文档。本节取代下文旧的“reported 不参与推理”描述。已有身份声明仍保留问号，不能当作客观事实。
+
+新录入的技能、死亡与全局假设默认 `enabled:true`，结算后的投票记录默认启用；未结算的投票仍以 `enabled:false` 草稿保存。全局假设唯一以 `enabled` 作为真实开关（`requested_enabled` 仅为兼容旧读者）。**旧快照中的 `enabled:false` 记录不会被自动启用**：全局假设可通过其开关启用，其他旧记录可在高级数据的 JSON 中显式改为 `enabled:true` 或重新录入后参与推理。
 
 ## 固定时点与记录纠错
 
@@ -106,7 +108,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 ```js
 {
   id: "f-night-deaths-<unique>",
-  type: "botc:night_deaths", status: "confirmed", enabled: false,
+  type: "botc:night_deaths", status: "confirmed", enabled: true,
   data: {
     time: { phase: "night", number: 1 },
     player_ids: ["p1", "p2"], result: "deaths"
@@ -115,9 +117,9 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 // 无人死亡：player_ids: [], result: "none"
 ```
 
-每夜一个可追溯 fact（包括无人死亡）；confirmed 仅确认用户记录的死亡观察，不生成 role/alignment 或假设。扩展始终 disabled，文案“死亡已记录，尚未参与推理”；未知扩展若启用，当前后台会拒绝。后端接入需实现 schema、时间/玩家引用、重复死亡与规则解释的校验及显式启用机制，不能仅以输入通过核心校验宣称引擎支持。`deadAt` 只读取 confirmed、结构有效的该扩展死亡列表，disabled 不影响本地观察展示；不从技能结果猜测死亡。
+每夜一个可追溯 fact（包括无人死亡）；confirmed 仅确认用户记录的死亡观察，不生成 role/alignment 或假设。启用后记录作为该夜死亡观察参与推理；模型不支持首夜死亡，首夜仅接受无人死亡（有死者会被 `UNSUPPORTED_OBSERVATION` 拒绝）。`deadAt` 只读取 confirmed、结构有效的该扩展死亡列表，不影响本地观察展示；不从技能结果猜测死亡。
 
-圆卡增加“已死亡”文字与中性侧边框，保留阵营顶边、背景色及角色可读性，仍可打开假设/动作。阶段时间表示阶段结束：night1 死亡在 night1、day1 及以后可见，setup/更早阶段不显示。整局“假设与动作”保留原两组，新增独立“死亡记录”轻卡，显示夜次、玩家或无人、不参与推理及完整来源 JSON。不提供死亡记录删除/重开，以免破坏后续死亡一致性；高级 JSON 仍可查看和导入，导入的扩展不替代后端规则校验。
+圆卡增加“已死亡”文字与中性侧边框，保留阵营顶边、背景色及角色可读性，仍可打开假设/动作。阶段时间表示阶段结束：night1 死亡在 night1、day1 及以后可见，setup/更早阶段不显示。整局“假设与动作”保留原两组，新增独立“死亡记录”轻卡，显示夜次、玩家或无人及完整来源 JSON。不提供死亡记录删除/重开，以免破坏后续死亡一致性；高级 JSON 仍可查看和导入，导入的扩展不替代后端规则校验。
 
 ### 白天提名、投票与处决
 
@@ -134,7 +136,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 ```js
 {
   id: "f-day-vote-<unique>", type: "botc:day_vote",
-  enabled: false, status: "confirmed",
+  enabled: true, status: "confirmed", // voting 草稿为 enabled:false
   data: {
     time: {phase: "day", number: 1}, stage: "settled", // 或 voting
     nominations: [{id: "nomination-<unique>", nominator_id: "p1",
@@ -146,19 +148,23 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 }
 ```
 
-投票中人数/阈值为进入时摘要；结算时重新计算并持久化。`default_player_id`、`highest_count` 是本地默认选择解释，不是规则求解结果。`App.saveNomination(expected,data)`、`removeNomination(expected,id)`、`settleVoting(expected,playerId)`、`finishVotingDay(expected)` 要求当前阶段和有效 epoch context。`DayVoting.perform` 仅在自身保存期间接受恰好下一 epoch，其余 mutation、导入、示例、新局使旧窗口失效；技能保存也走同一 context 刷新路径。每次 mutation 都通过既有快照更新机制同步完整 JSON、revision、request_id 并清除响应。记录卡显示提名、投票者、票数、阈值、处决、默认/覆盖与完整 JSON，始终提示尚未参与推理。所有扩展保持 enabled:false，不派生 confirmed role/alignment。
+投票中人数/阈值为进入时摘要；结算时重新计算并持久化。`default_player_id`、`highest_count` 是本地默认选择解释，不是规则求解结果。`App.saveNomination(expected,data)`、`removeNomination(expected,id)`、`settleVoting(expected,playerId)`、`finishVotingDay(expected)` 要求当前阶段和有效 epoch context。`DayVoting.perform` 仅在自身保存期间接受恰好下一 epoch，其余 mutation、导入、示例、新局使旧窗口失效；技能保存也走同一 context 刷新路径。每次 mutation 都通过既有快照更新机制同步完整 JSON、revision、request_id 并清除响应。记录卡显示提名、投票者、票数、阈值、处决、默认/覆盖与完整 JSON。
 
-快照中保存不等于刷新自动恢复；当前仍无 localStorage，需导出/复制请求 JSON 后导入。后端只校验通用禁用扩展容器，不代表支持投票规则求解。
+`stage: voting` 的草稿以 `enabled:false` 保存，只保留未完成轮次；`settleVoting` 写入 `stage:settled` 并同时置 `enabled:true`，作为该白天提名、投票与处决的结构化约束参与推理（未完成轮次不推断后续提名槽）。`enabled:false` 的旧快照草稿不会自动启用。
+
+快照中保存不等于刷新自动恢复；当前仍无 localStorage，需导出/复制请求 JSON 后导入。
 
 ### 推理操作区（操作说明）
 
 - 固定在圆桌后、“假设与动作”前的独立 section。左侧为唯一主入口“开始推理”，右侧初始为空，下方结果区初始隐藏；不因完成初始设置而自动发送。顶部不另设发送按钮。
 - `App.reason()` 复用 `app.js` 的唯一 `sendRequest` 路径。`App.reasonState` 提供 busy / pending / error，`Roundtable.render` 接入 `Reasoning.render`。请求中按钮禁用并显示“推理中…”，右侧显示“正在推理…”。函数自身也阻止重复调用；输入变化后不会偷偷排队发送新请求，需等待旧请求结束再手动推理。
 - 发送前通过 `Roundtable.getSelectedTime()` 获取真正选定的圆桌时点，为每名玩家补充 good / evil 两项阵营查询，并补充该时点已启用事实、声明、假设中的 role / alignment 命题。命题去重，已有用户查询及 id 原样保留，不从模型、技能结果或角色名称推测阵营。不枚举 22 个角色：7 人未知局首次补 14 项，15 人补 30 项，另加已录入候选；界面明确提示“查询当前展示时点的阵营和已记录身份候选”。保留的历史查询也可能出现在结论中，每项均注明时间。
-- 自动 id 基于命题内容且避开 request/game/player/fact/assumption/query 所有集合的 id；重复推理不重复添加相同查询。仅查询集合确有增加时 revision +1、更新 request_id、清除旧响应、递增 epoch 并同步 JSON；然后只发一次完整快照。不为展示时点修改 `game.time`，超出真实对局进度时拒绝查询未来身份。后端 `validation.py` 没有查询数量上限，但每项可能触发额外求解，因此本界面避免全角色枚举；保留的用户查询仍可能增大开销，整体传输超时为 20 秒。
+- 自动 id 基于命题内容且避开 request/game/player/fact/assumption/query 所有集合的 id；重复推理不重复添加相同查询。仅查询集合确有增加时 revision +1、更新 request_id、清除旧响应、递增 epoch 并同步 JSON；然后只发一次完整快照。不为展示时点修改 `game.time`，超出真实对局进度时拒绝查询未来身份。后端 `validation.py` 没有查询数量上限，但每项可能触发额外求解，因此本界面避免全角色枚举；保留的用户查询仍可能增大开销。前端整体传输超时由 `requestTimeoutMs` 计算：逻辑分析总预算默认 8000ms，启用概率估计时再加独立的默认 120000ms，另加 30000ms 宽限；用户配置最大为 60000 + 300000 + 30000 = 390000ms。`timeout_ms` 是单次求解上限，不累加进传输预算。建模或适配器锁排队超过 30 秒宽限仍可能触发网络超时。
 - 只有 API 基本结构有效且 request_id / game_id / revision 匹配当前快照、非 placeholder 的响应才可作为推理结论。`sat` 显示“有可行解”，展开“恒为真结论”，仅按请求 query id 对应 `necessary` 结果，展示座位姓名、时间、中文角色或阵营及来源 id。明确“在当前已启用假设下恒为真”；假设本身的必然性不是额外独立证明。不采用 possible 或 model assignment。没有 necessary 时写“后台未返回必然结论”，不声称不存在必然真理，也不声称已查询所有身份。
 - `unsat` 显示“有矛盾”并展开后台 conflicts，解析事实 / 玩家声明 / 假设命题或动作名称，input_id / rule_id 原样保留为次要文字。无解释时显示“后台尚未返回矛盾原因，待接入后展示”。不编造证明，也不宣称最小冲突。
 - `unknown` 显示“暂时无法判断”及后台 reason；placeholder 显示“后台尚未接入推理”，即使其 consistency 为 sat 也不显示可行解。HTTP / 网络 / 非 JSON / 协议错误显示可读错误，不当作矛盾。示例或手动导入的有效匹配响应也可展示，但数据来源区域始终注明来源，不能当作实时计算。
+- 答复后展示后台 `extensions["reasoner:participation"]` 的逐条参与情况：`applied`（已作为结构化约束参与）、`partial`（只提供部分结构化约束，如圣徒只约束处决、市长只约束三人无处决）、`record_only`（仅记录，未产生约束，如间谍自由文本、隐士备注、疑似转移击杀、未观察结果）与 `disabled`（已停用）。发送前也会提示启用 / 停用的全局假设数量。
+- 页眉“新建对局”左侧的“概率估计模式”开关（`App.setProbabilityMode`）写入 `request.options.probability_mode`。开启后随“开始推理”请求后台做一次**独立的**初始身份带权抽样估计（`options.probability_timeout_ms`，默认 120000），在结果区额外展示每位玩家的角色概率（如“3 号：共情者 62.0%、厨师 38.0%”）。它**不改变本次逻辑结果**，只是并行估计。估计时 public 输入（如已确认夜间死亡、已结算投票）始终是硬条件；`reported` 声明、条件观察等按 `owner_id` 分组，以可信度 0.7 采信后枚举组合，因此用户输入之间的矛盾只会排除相应组合，不必然让整次估计变成矛盾。展示时明确标注“带权抽样估计，不是精确概率，也不是必然结论”；`status != estimated`（超时、预算不足或 public 背景矛盾）时只显示原因，**不把缺失读成零概率**。开关状态随快照保存，切换会更新请求版本并清除旧响应。
 - 修改事实、假设、动作、请求 JSON、响应 JSON、加载其他数据或完成新局均清除旧结论；进行中的旧响应经 epoch 拒绝。编辑发生后右侧恢复空白，旧传输未结束前按钮仍禁用以避免并发。状态使用 aria-live，按钮有禁用 / busy / expanded 语义；重绘恢复键盘焦点，不抢走用户正在操作的假设开关或弹窗焦点。窄屏允许状态文字换行，不产生页面横向滚动。
 
 ### 假设与动作（整局记录）
@@ -166,7 +172,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 - 圆桌下方固定汇总**当前快照整局全部时点、全部玩家**的记录，不按所选玩家或圆桌时间筛选。按“身份 / 阵营假设”和“动作观察”分组显示数量，每条一张卡；两组各有零记录提示。圆桌本身仍严格按时点展示，不跨时间沿用候选。
 - 启用、停用假设都显示中文身份及 `?`、玩家座位姓名、明确时间、手工 / 动作关联来源与状态。导入的 alignment 假设显示善良 / 邪恶阵营。右侧滑块为原生 checkbox `role=switch`，Tab 可聚焦，Space 切换；可访问名称说明启用 / 停用的玩家、时间与身份。失败恢复原勾选并显示错误，不因 unsat / unknown 禁止编辑。
 - 滑块调用 `App.setAssumptionEnabled`，更新 revision、request_id 与 JSON，清空旧响应并重绘圆桌和关联动作状态；通过 `data-focus` 恢复同一开关焦点，保留页面与圆桌滚动位置。停用假设不隐藏记录，只移除相应时点的候选（其他声明 / 假设仍可提供相同候选）。
-- 动作卡直显技能名（角色）、发动者、时点、中文座位姓名目标、中文结果和备注，始终提示“已记录，技能结果尚未参与推理”。关联假设显示当前启用 / 停用状态；假设开关不启用技能观察本身，动作不提供总开关。
+- 动作卡直显技能名（角色）、发动者、时点、中文座位姓名目标、中文结果和备注；已启用记录提示“结构化部分在下次推理作为约束”，自由文本或未支持结果仅记录、不产生约束。关联假设显示当前启用 / 停用状态；假设开关不启用技能观察本身，动作不提供总开关。
 - 每条假设可删除，动作可“删除动作及专用假设”，分别使用现有 `App.removeAssumption` / `App.removeAbility`，不删除其他手工或动作假设。未知字段保留在可折叠的完整来源 JSON 中；手机卡片自动单列，开关独占固定宽度，不挤压身份文字。
 
 ### 高级数据 / 调试
@@ -190,7 +196,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 
 - **表单描述：`skills.js`**，负责技能名、目标数量、结果结构；不要在各个弹窗里重复写角色规则。
 - **前端时间筛选：`skill-availability.js`**，`check(skill, time)` 返回是否可用及原因，`resultOptions(skill, time)` 返回该时点可选结果，`assert(skill, data)` 供保存路径再次校验。动作窗口与投票后的技能补录共用同一表单；`App.recordAbility` 经 `ClocktowerSkills.validate` 调用同一校验，不能靠直接调用绕过时间限制。
-- **后台规则与求解：由转换层维护**。前端筛选只简化录入，不确认身份、不证明技能生效、不替代后台校验。扩展记录仍保持 `enabled:false`，尚未参与推理。
+- **后台规则与求解：由转换层维护**。前端筛选只简化录入，不确认身份、不证明技能生效、不替代后台校验。技能观察默认 `enabled:true`；后台对结构化结果编译为约束，自由文本与未支持的结果仅记录（详见下表“推理参与”）。
 
 当前时间限制：
 
@@ -218,14 +224,14 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 - 手工假设支持“身份 / 阵营”两种命题：选择“身份 role”可从 22 角色选择，“阵营 alignment”从善良 good / 邪恶 evil 单选；编辑区即时预览，只有“保存假设”才写入快照。动作选定技能后即时预览“将假设该玩家为 X”；只有“保存动作及身份假设”一次性创建记录与专用假设。取消或仅选择类型 / 技能不修改快照。
 - 时间默认圆桌展示时点，可选 setup / night / day，编号限制 1–99。未来时点明确提示“对局进度同步至 X”，保存推进 `game.time`，历史记录不后退；保存后圆桌展示保存时点。
 - `App.addAssumption(playerId, roleId, time)`、`App.addAlignmentAssumption(playerId, alignment, time)`、`recordAbility(data)`、`setAssumptionEnabled(id, enabled)`、`removeAssumption(id)`、`removeAbility(id)` 是显式变更入口。其中 `addAlignmentAssumption` 创建 alignment 命题，`alignment` 仅接受 `good` / `evil`，不从 role 硬编码推阵营。成功变更均在原 revision 基础上 +1、生成新 request_id、epoch +1、清除旧响应并同步编辑框、原始 JSON 和视图；不借助 `startGame` 重置版本。失败不保存部分数据。旧异步响应不能覆盖新记录。
-- 假设支持停用、恢复、删除；动作支持删除。每个动作都有独立假设，角色相同也不共享 id。删除动作只删除双向 id 均匹配的专用假设，手工及其他动作假设不受影响。单独删除假设会移除动作上的旧关联；技能观察始终禁用，不能在 UI 中恢复为参与推理。
+- 假设支持停用、恢复、删除；动作支持删除。每个动作都有独立假设，角色相同也不共享 id。删除动作只删除双向 id 均匹配的专用假设，手工及其他动作假设不受影响。单独删除假设会移除动作上的旧关联。技能观察默认启用并作为约束参与推理；自由文本或未支持结果仍可保存，但不产生约束。
 
 ### 扩展 schema（使用现有 ExtensionFact，不修改通用协议）
 
 ```js
 {
   id: "f-ability-<unique>", type: "botc:ability_observation",
-  status: "confirmed", enabled: false,
+  status: "confirmed", enabled: true,
   data: {
     actor_id: "p1", role_id: "fortune_teller",
     ability_id: "fortune_teller:record",
@@ -236,36 +242,36 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 }
 ```
 
-对应 assumption 为 `{id, enabled:true, proposition:{kind:'role', player_id:actor_id, role_id, time}, extensions:{'ui:observation_id':fact.id}}`。`confirmed` 仅确认记录了观察，并不确认技能读数等于事实。动作**始终 enabled:false**，显示“已记录，技能结果尚未参与推理”；自动角色假设则启用。绝不从动作结果生成真实 role/alignment confirmed。当前后端拒绝未知活跃类型；后续接入必须实现扩展运行时校验、目标引用/结果校验及醉酒、中毒等规则解释后，再设计显式启用流程；目前不改 capability、不宣称技能求解支持。
+对应 assumption 为 `{id, enabled:true, proposition:{kind:'role', player_id:actor_id, role_id, time}, extensions:{'ui:observation_id':fact.id}}`。`confirmed` 仅确认记录了观察，并不确认技能读数等于事实。技能观察默认 `enabled:true`；结构化结果由转换层编译为约束，自由文本或未支持结果仅记录、不产生约束，后台会拒绝未知的活跃扩展类型。绝不从动作结果生成真实 role/alignment confirmed。
 
 所有 ability_id 固定为 `<role_id>:record`。targets 是去重的玩家 id 数组，备注 note 是字符串。结果为判别对象：`{kind:'role',role_id}`、`{kind:'choice',value,role_id?}`、`{kind:'number',value}`、`{kind:'text',text}`、`{kind:'no_direct_result'}`、`{kind:'no_outsiders'}` 或 `{kind:'unobserved'}`。数字、角色、文本结果支持勾选未观察；choice 结果内有 `unobserved` 选项；无直接结果技能不虚构读数。
 
-| role_id / 中文 | 目标 | 结果 |
-| --- | --- | --- |
-| washerwoman / 洗衣妇 | 指示两人 | 镇民 role_id |
-| librarian / 图书管理员 | 指示两人；无外来者分支为零人 | 外来者 role_id 或 no_outsiders |
-| investigator / 调查员 | 指示两人 | 爪牙 role_id |
-| chef / 厨师 | 无 | 0…玩家人数邻对数量 |
-| empath / 共情者 | 无 | 0 / 1 / 2 |
-| fortune_teller / 占卜师 | 两人 | yes / no / unobserved |
-| undertaker / 送葬者 | 一名被处决玩家 | 任意角色 |
-| monk / 僧侣 | 一人，不可自己 | no_direct_result |
-| ravenkeeper / 守鸦人 | 一人 | 任意角色（死亡触发） |
-| virgin / 贞洁者 | 一名提名者 | executed / not_executed / unobserved |
-| slayer / 猎手 | 一人 | died / survived / unobserved |
-| soldier / 士兵 | 无 | survived / died / unobserved；不证明免疫 |
-| mayor / 市长 | 可选有关玩家 | three_alive_no_execution_win / suspected_redirect / unobserved |
-| butler / 管家 | 一人主人，不可自己 | no_direct_result |
-| drunk / 酒鬼 | 无 | 表象镇民 role_id，自动假设仍为酒鬼 |
-| recluse / 隐士 | 无 | role / alignment / unobserved，具体登记写备注 |
-| saint / 圣徒 | 无 | good_lost / good_won / ongoing / unobserved |
-| poisoner / 投毒者 | 一人 | no_direct_result |
-| spy / 间谍 | 可选多个有关玩家 | 多行完整魔典文本 |
-| scarlet_woman / 红唇女郎 | 无 | occurred / not_occurred / role（附 role_id）/ unobserved |
-| baron / 男爵 | 无 | setup 外来者数量 0…玩家人数，或未观察 |
-| imp / 小恶魔 | 一人，可自己 | died / survived / unobserved，不确认为死因 |
+| role_id / 中文 | 目标 | 结果 | 推理参与 |
+| --- | --- | --- | --- |
+| washerwoman / 洗衣妇 | 指示两人 | 镇民 role_id | 两人中的一人为该镇民 |
+| librarian / 图书管理员 | 指示两人；无外来者分支为零人 | 外来者 role_id 或 no_outsiders | 两人中的一人为该外来者；零人分支约束本局无外来者 |
+| investigator / 调查员 | 指示两人 | 爪牙 role_id | 两人中的一人为该爪牙 |
+| chef / 厨师 | 无 | 0…玩家人数邻对数量 | 邪恶邻对数量 |
+| empath / 共情者 | 无 | 0 / 1 / 2 | 存活邻座邪恶数量 |
+| fortune_teller / 占卜师 | 两人 | yes / no / unobserved | 是否包含恶魔 |
+| undertaker / 送葬者 | 一名被处决玩家 | 任意角色 | 该玩家为处决死者的真实角色 |
+| monk / 僧侣 | 一人，不可自己 | no_direct_result | 保护目标选择 |
+| ravenkeeper / 守鸦人 | 一人 | 任意角色（死亡触发） | 目标真实角色 |
+| virgin / 贞洁者 | 一名提名者 | executed / not_executed / unobserved | 提名者是否被处决 |
+| slayer / 猎手 | 一人 | died / survived / unobserved | 射击目标选择与是否死亡 |
+| soldier / 士兵 | 无 | survived / died / unobserved | 目标存活状态；不证明免疫 |
+| mayor / 市长 | 可选有关玩家 | three_alive_no_execution_win / suspected_redirect / unobserved | three_alive 只约束三人存活且无人处决，**不判断胜利**；suspected_redirect 与 unobserved 仅记录 |
+| butler / 管家 | 一人主人，不可自己 | no_direct_result | 主人选择 |
+| drunk / 酒鬼 | 无 | 表象镇民 role_id，自动假设仍为酒鬼 | 该玩家为酒鬼且表象为该镇民 |
+| recluse / 隐士 | 无 | role / alignment / unobserved，具体登记写备注 | **仅记录**，备注不转换为登记身份/阵营 |
+| saint / 圣徒 | 无 | good_lost / good_won / ongoing / unobserved | 白天被处决时只约束“已被处决”，**不判断游戏胜负** |
+| poisoner / 投毒者 | 一人 | no_direct_result | 投毒目标选择 |
+| spy / 间谍 | 可选多个有关玩家 | 多行完整魔典文本 | **仅记录**，自由文本不解析为身份约束 |
+| scarlet_woman / 红唇女郎 | 无 | occurred / not_occurred / role（附 role_id）/ unobserved | 是否转化为小恶魔 |
+| baron / 男爵 | 无 | setup 外来者数量 0…玩家人数，或未观察 | 初始外来者数量 |
+| imp / 小恶魔 | 一人，可自己 | died / survived / unobserved，不确认为死因 | 击杀目标选择与目标是否死亡，不确认为死因 |
 
-目标少于/多于要求、重复、非本局玩家、禁止自己、非法角色结果、越界数量会明确报错且不变更快照。具体实现与 value 枚举以 `skills.js` 为准。弹窗不是技能规则求解器，也不校验观察真实性，不将间谍文本结构化为全局身份。
+目标少于/多于要求、重复、非本局玩家、禁止自己、非法角色结果、越界数量会明确报错且不变更快照。具体实现与 value 枚举以 `skills.js` 为准，后台对结构化结果的编译见 [`../connector.py`](../connector.py) 与 [`../backend/extension_validation.py`](../backend/extension_validation.py)。弹窗不是技能规则求解器，也不校验观察真实性，不将间谍文本结构化为全局身份。
 
 ## 后台接入
 
@@ -273,11 +279,11 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 
 若后台使用 placeholder 适配器（框架默认值，`main.py web` 不会使用），响应的 `extensions["adapter:mode"] == "placeholder"` 会使来源标记与推理区域明确说明**占位未运行引擎**，不会把响应当作真实推理结论。输入通过校验不代表引擎支持相应规则。
 
-网页对成功响应检查 API 版本、基本 reason response 结构和查询状态，然后严格比较当前请求的 request_id/game_id/revision；不匹配或发送过程中输入发生变化的响应不会应用。网络失败、20 秒超时、非 JSON、HTTP 错误均明确提示，不伪造结果。HTTP 错误体含 error 时展示并保留原始内容；逻辑 unsat 是正常推理响应，不能当作 HTTP 失败。部署时静态页面和 API 应使用同源地址（`main.py web` 已同源），或由反向代理转发 `/api/`。
+网页对成功响应检查 API 版本、基本 reason response 结构和查询状态，然后严格比较当前请求的 request_id/game_id/revision；不匹配或发送过程中输入发生变化的响应不会应用。网络失败、请求超过 `requestTimeoutMs`（逻辑总预算 + 独立概率预算 + 30 秒宽限，最大 390 秒）、非 JSON、HTTP 错误均明确提示，不伪造结果。HTTP 错误体含 error 时展示并保留原始内容；逻辑 unsat 是正常推理响应，不能当作 HTTP 失败。部署时静态页面和 API 应使用同源地址（`main.py web` 已同源），或由反向代理转发 `/api/`；反向代理的超时应大于 390 秒，而不是假定可无限等待。
 
 ## 验证
 
-死亡功能的 Chromium CDP 验收：setup → night1 不弹窗；night1 next 弹窗、时间不提前、初始确认禁用；Escape / 取消保留完整快照并返回 next 焦点；两人死亡确认后 day1 两张卡标死，仅一次 revision / request_id 更新、disabled fact 数据正确、清响应且不请求 API；day1 完成投票与技能检查后进入 night2；night2 已死者禁用、无人分支清空选人并记录空数组；setup 历史不显示死亡、night1 结束显示死亡；其他 mutation / 新局关闭弹窗且旧 context 拒绝；推理 busy 不推进、进行中旧响应拒绝；night99 确认后 day99 达上限禁用；原生 Space / Tab / Escape 与 320px 弹窗无横溢。捕获完整请求，仅调用 `backend.validation.validate_request` 检查协议有效性，不改后端、不运行引擎。
+死亡功能的 Chromium CDP 验收：setup → night1 不弹窗；night1 next 弹窗、时间不提前、初始确认禁用；Escape / 取消保留完整快照并返回 next 焦点；两人死亡确认后 day1 两张卡标死，仅一次 revision / request_id 更新、enabled fact 数据正确、清响应且不请求 API；day1 完成投票与技能检查后进入 night2；night2 已死者禁用、无人分支清空选人并记录空数组；setup 历史不显示死亡、night1 结束显示死亡；其他 mutation / 新局关闭弹窗且旧 context 拒绝；推理 busy 不推进、进行中旧响应拒绝；night99 确认后 day99 达上限禁用；原生 Space / Tab / Escape 与 320px 弹窗无横溢。捕获完整请求，仅调用 `backend.validation.validate_request` 检查协议有效性，不改后端、不运行引擎。
 
 投票功能的真实 Chromium CDP 验收脚本位于临时测试目录 `/tmp/opencode/day-voting-check.mjs`，运行 `node --experimental-websocket /tmp/opencode/day-voting-check.mjs`（复用端口 9223 Chromium 与 8765 网页服务）。覆盖完整设置→夜晚死亡→白天多轮投票，死者提名校验/被提名/投票，保存关闭恢复与删除，7 活 4 票、6 活 3 票、不同人同票、同人多轮最高不叠加，无提名和全死无人默认，手动覆盖处决、结算留白天、历史不提前标死，死者处决不重复扣人数，技能保存/取消返回结算，最终推进及下一夜死亡禁用，无自动 API、旧 context 拒绝、Escape 焦点与 320px 无横溢。最终含投票/处决/技能的请求保存在 `/tmp/opencode/day-voting-request.json`，仅调用后台 validation 校验。
 
@@ -314,9 +320,9 @@ git diff --check
 
 “推理”卡片中，“开始推理”左侧的 **新增假设** 用于添加不属于单个玩家的条件。当前支持“某角色不在场”：选择角色后，作用时间取打开窗口时圆桌展示的时点。例如“初始配置时小恶魔不在场”，表示该时点没有任何玩家具有此角色，不代表整局所有时间均不存在。
 
-保存后的记录位于“假设与动作 → 全局假设”，可以切换希望采用的状态或删除。保存、切换、删除都会更新请求版本、清除旧推理响应；取消不产生记录，同一角色同一时点不能重复添加。新局、导入或其他快照变化会关闭过期窗口。
+保存后的记录位于“假设与动作 → 全局假设”，可以切换启用 / 停用或删除。保存、切换、删除都会更新请求版本、清除旧推理响应；取消不产生记录，同一角色同一时点不能重复添加。新局、导入或其他快照变化会关闭过期窗口。
 
-**后台接入状态：** 当前核心命题不支持角色缺席，因此此功能先保存为停用扩展，尚未参与推理；开关仅表达接入后是否希望采用，不能把推理结果当作已考虑此条件。
+**后台接入状态：** 全局假设是唯一以 `enabled` 作为真实开关的记录。启用后由转换层编译为该时点“全部玩家真实角色均非此角色”的约束参与推理（`_role_bit` 依据时点取初始/夜晚/白天角色，不排除酒鬼表象），停用则不参与。`requested_enabled` 仅为兼容旧读者的记录字段，不决定是否参与。功能上仅支持“某角色不在场”。
 
 供转换层接入的数据约定（位于 `facts`，不修改现有 `assumptions` 命题格式）：
 
@@ -325,7 +331,7 @@ git diff --check
   "id": "a-global-唯一标识",
   "type": "botc:global_assumption",
   "status": "reported",
-  "enabled": false,
+  "enabled": true,
   "data": {
     "kind": "role_absent",
     "role_id": "imp",
@@ -335,4 +341,4 @@ git diff --check
 }
 ```
 
-`enabled` 保持 `false`，确保未支持此类型的后台可接收完整快照；`requested_enabled` 是用户选择。后端接入时需明确协商支持并将其编译为该时点全部玩家均非此角色的临时约束，不能按普通 `reported` 声明忽略后仍声称此假设已参与求解。
+旧快照里的 `enabled:false` 全局假设不会自动启用，需通过卡片的开关启用；`requested_enabled` 不激活它。

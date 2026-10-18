@@ -16,11 +16,14 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from itertools import combinations, product
+from typing import Any
 
-from z3 import And, BoolRef, Implies, Not, Or, Solver, is_true, sat, unsat
+from z3 import And, BoolRef, Implies, Not, Or, Solver, is_true, sat, unknown, unsat
 
+from botc_reasoner.analysis import REASON_BUDGET_EXHAUSTED, REASON_SOLVE_TIMEOUT, Budget
 from botc_reasoner.roles import DEMONS, EVIL_ROLES, MINIONS, OUTSIDERS, TOWNSFOLK, Role
 from botc_reasoner.rules import ability_role
 from botc_reasoner.variables import Ability, TroubleBrewingVars
@@ -31,8 +34,48 @@ DEFAULT_PLAYER_CREDIBILITY = 0.7
 GOOD_CLAIM_MISMATCH = 0.05
 EVIL_CLAIM_MISMATCH = 1.0 / 3.0
 
-_SAMPLE_ACCEPTED = 500
-_SAMPLE_TRIALS = 2000
+_SAMPLE_ACCEPTED = 10
+_SAMPLE_TRIALS = 100
+
+
+class ProbabilityIncomplete(RuntimeError):
+    """概率估计在预算耗尽（或求解返回 ``unknown``）时无法给出可信结论。
+
+    这不是「不可能」或「无解」的信号：调用方必须把它当作 ``unknown`` 处理，
+    不能据此把任何组或世界当作排除掉，也不能沿用采样结果。
+    """
+
+
+_current_budget: ContextVar[Budget | None] = ContextVar("botc_probability_budget", default=None)
+
+
+def _budget_check(solver: Solver) -> Any:
+    """在存在预算时按预算求解，否则退回无预算的 ``solver.check()``。
+
+    预算下求解返回 ``unknown``（总预算耗尽或单次超时）时抛出
+    :class:`ProbabilityIncomplete`，调用方据此把结果标为 ``unknown``。
+    """
+
+    budget = _current_budget.get()
+    if budget is None:
+        return solver.check()
+    status = budget.check(solver)
+    if status == unknown:
+        raise ProbabilityIncomplete(budget.reason or REASON_SOLVE_TIMEOUT)
+    return status
+
+
+def _budget_deadline_exhausted() -> bool:
+    """在长 CPU 循环里检查总预算是否已经耗尽。"""
+
+    budget = _current_budget.get()
+    if budget is None:
+        return False
+    if budget.deadline_exhausted():
+        budget.hit = True
+        budget.reason = REASON_BUDGET_EXHAUSTED
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -110,16 +153,64 @@ def estimate_role_probabilities(
     seed: int = 0,
     target_accepted: int | None = None,
     max_trials: int | None = None,
+    budget: Budget | None = None,
 ) -> list[dict[Role, float]] | None:
     """返回每名玩家的 ``角色 -> 概率``。没有任何可行组时返回 None。
+
+    可选 ``budget`` 为该次估计设置总时间预算。传入预算后，中途预算耗尽或求解返回
+    ``unknown`` 时抛出 :class:`ProbabilityIncomplete`——调用方必须据此把结果标为
+    ``unknown``，**不能**把未判定的组或世界当成排除掉。不传预算时行为与过去一致。
 
     每名有自称的其他玩家可信度默认 0.7。分组决定采信哪些自称；
     被忽略的自称不能超过 ``E + floor(G/5) - O``。忽略数 ``i`` 大于邪恶人数时，
     该组权重再乘 ``1/3^(i-E)``。被忽略的技能信息先合并写法数 ``M``，再乘 ``1/(1+log2(M))``。
     采信后，其技能信息在清醒时必须成立。
     组内按抽样频率把这一组的权重分给每个座位。逻辑上无解的组权重为 0。
-    ``trusted_abilities`` 已作为确定前提写进求解器。
+    ``trusted_abilities`` 作为确定前提已由调用方写进求解器；干扰乘数计算时
+    再把这些观察与 ``soft_abilities`` 合并（不得改变硬约束分组），
+    使本人/HTTP 的确定观察同样计入投毒、酒鬼、陪衬等健康信息权重。
     """
+
+    token = _current_budget.set(budget)
+    try:
+        return _estimate_role_probabilities_internal(
+            n_players,
+            counts,
+            beliefs=beliefs,
+            pinned_roles=pinned_roles,
+            absent_roles=absent_roles,
+            drunk_players=drunk_players,
+            soft_roles=soft_roles,
+            soft_abilities=soft_abilities,
+            trusted_abilities=trusted_abilities,
+            solver=solver,
+            world=world,
+            seed=seed,
+            target_accepted=target_accepted,
+            max_trials=max_trials,
+        )
+    finally:
+        _current_budget.reset(token)
+
+
+def _estimate_role_probabilities_internal(
+    n_players: int,
+    counts: tuple[int, int, int, int],
+    *,
+    beliefs: Sequence[tuple[int, Role]] = (),
+    pinned_roles: Sequence[tuple[int, Role]] = (),
+    absent_roles: Sequence[Role] = (),
+    drunk_players: Sequence[int] = (),
+    soft_roles: Sequence[tuple[int, Role]] = (),
+    soft_abilities: Sequence[AbilityObservation] = (),
+    trusted_abilities: Sequence[AbilityObservation] = (),
+    solver: Solver | None = None,
+    world: TroubleBrewingVars | None = None,
+    seed: int = 0,
+    target_accepted: int | None = None,
+    max_trials: int | None = None,
+) -> list[dict[Role, float]] | None:
+    """``estimate_role_probabilities`` 的实现，预算经 :data:`_current_budget` 传入。"""
 
     particles = joint_assignment_particles(
         n_players,
@@ -130,6 +221,7 @@ def estimate_role_probabilities(
         drunk_players=drunk_players,
         soft_roles=soft_roles,
         soft_abilities=soft_abilities,
+        trusted_abilities=trusted_abilities,
         solver=solver,
         world=world,
         seed=seed,
@@ -161,6 +253,7 @@ def joint_assignment_particles(
     drunk_players: Sequence[int] = (),
     soft_roles: Sequence[tuple[int, Role]] = (),
     soft_abilities: Sequence[AbilityObservation] = (),
+    trusted_abilities: Sequence[AbilityObservation] = (),
     solver: Solver | None = None,
     world: TroubleBrewingVars | None = None,
     seed: int = 0,
@@ -170,6 +263,7 @@ def joint_assignment_particles(
     """按与 :func:`estimate_role_probabilities` 相同的联合权重返回身份样本。
 
     每项是 ``(座位身份, 未归一化权重, 该组采信的自称)``。权重已经乘过组权重和干扰乘数。
+    传入 ``trusted_abilities`` 时，只把它们并入干扰乘数，不改变硬约束分组。
     """
 
     if n_players <= 0:
@@ -204,7 +298,7 @@ def joint_assignment_particles(
                     absent_roles,
                     drunk_players,
                 )
-                if solver.check() == unsat:
+                if _budget_check(solver) == unsat:
                     continue
             samples: list[tuple[Role, ...]] = []
             if max_trials > 0:
@@ -240,6 +334,14 @@ def joint_assignment_particles(
                 )
             if not samples:
                 continue
+            combined_abilities = [*soft_abilities, *trusted_abilities]
+            weighted_claims = (
+                *trusted,
+                *(
+                    (observation.actor, ability_role(observation.ability))
+                    for observation in trusted_abilities
+                ),
+            )
             weighted = [
                 (
                     bag,
@@ -248,8 +350,8 @@ def joint_assignment_particles(
                         world,
                         bag,
                         beliefs=(*beliefs, *trusted),
-                        trusted_claims=trusted,
-                        soft_abilities=soft_abilities,
+                        trusted_claims=weighted_claims,
+                        soft_abilities=combined_abilities,
                     )
                     if use_solver
                     else 1.0,
@@ -288,6 +390,8 @@ def _credibility_groups(
     ignore_limit = max(0, evil + good // 5 - unclaimed)
     groups = []
     for mask in range(1 << len(claimers)):
+        if _budget_deadline_exhausted():
+            raise ProbabilityIncomplete(REASON_BUDGET_EXHAUSTED)
         trusted = tuple(claim for index, claim in enumerate(claimers) if mask & (1 << index))
         ignored_claims = [claim for claim in claimers if claim not in trusted]
         ignored = len(ignored_claims)
@@ -331,7 +435,7 @@ def _group_is_possible(
             absent_roles,
             drunk_players,
         )
-        return solver.check() != unsat
+        return _budget_check(solver) != unsat
     finally:
         solver.pop()
 
@@ -366,6 +470,8 @@ def _conditional_bags(
         )
         found: list[tuple[Role, ...]] = []
         for _ in range(limit):
+            if _budget_deadline_exhausted():
+                raise ProbabilityIncomplete(REASON_BUDGET_EXHAUSTED)
             bag = _one_conditional_bag(solver, world, beliefs, rng)
             if bag is None:
                 break
@@ -391,6 +497,8 @@ def _one_conditional_bag(
             seen.add(player)
             townsfolk_players.append(player)
     for prefer_split in ((True, False) if townsfolk_players else (False,)):
+        if _budget_deadline_exhausted():
+            raise ProbabilityIncomplete(REASON_BUDGET_EXHAUSTED)
         solver.push()
         try:
             if prefer_split:
@@ -399,10 +507,10 @@ def _one_conditional_bag(
                         solver.add(Not(world.is_drunk[player]))
                 else:
                     solver.add(world.is_drunk[rng.choice(townsfolk_players)])
-            if solver.check() == unsat:
+            if _budget_check(solver) == unsat:
                 continue
             _add_random_imp(solver, world, rng)
-            if solver.check() != sat:
+            if _budget_check(solver) != sat:
                 continue
             bag = _read_bag(solver.model(), world)
             if bag is not None:
@@ -416,10 +524,14 @@ def _add_random_imp(solver: Solver, world: TroubleBrewingVars, rng: random.Rando
     order = list(world.player_ids)
     rng.shuffle(order)
     for player in order:
+        if _budget_deadline_exhausted():
+            raise ProbabilityIncomplete(REASON_BUDGET_EXHAUSTED)
         solver.push()
-        solver.add(world.start_is(player, Role.IMP))
-        status = solver.check()
-        solver.pop()
+        try:
+            solver.add(world.start_is(player, Role.IMP))
+            status = _budget_check(solver)
+        finally:
+            solver.pop()
         if status == sat:
             solver.add(world.start_is(player, Role.IMP))
             return
@@ -569,7 +681,7 @@ def _poison_plan_factor(
                     solver.add(world.poisoned[night][actor])
                 else:
                     solver.add(Not(world.poisoned[night][actor]))
-        if solver.check() != sat:
+        if _budget_check(solver) != sat:
             return None
         matched = _matched_abilities(bag, mask, trusted_claims, soft_abilities)
         factor = 1.0
@@ -608,11 +720,13 @@ def _max_alive_good(
     ]
     for size in range(len(good), 0, -1):
         for subset in combinations(good, size):
+            if _budget_deadline_exhausted():
+                raise ProbabilityIncomplete(REASON_BUDGET_EXHAUSTED)
             solver.push()
             try:
                 for player in subset:
                     solver.add(world.alive_night_start[night][player])
-                if solver.check() == sat:
+                if _budget_check(solver) == sat:
                     return size
             finally:
                 solver.pop()
@@ -633,10 +747,12 @@ def _red_herring_factor(solver: Solver, world: TroubleBrewingVars, bag: tuple[Ro
         return 0.0
     eligible = 0
     for player in good:
+        if _budget_deadline_exhausted():
+            raise ProbabilityIncomplete(REASON_BUDGET_EXHAUSTED)
         solver.push()
         try:
             solver.add(world.red_herring[player])
-            if solver.check() == sat:
+            if _budget_check(solver) == sat:
                 eligible += 1
         finally:
             solver.pop()
@@ -737,6 +853,8 @@ def _sample_worlds(
     trials = 0
     while len(accepted) < target_accepted and trials < max_trials:
         trials += 1
+        if _budget_deadline_exhausted():
+            raise ProbabilityIncomplete(REASON_BUDGET_EXHAUSTED)
         if beliefs:
             drawn = _draw_with_beliefs(rng, n_players, counts, beliefs)
         else:
@@ -754,13 +872,13 @@ def _sample_worlds(
             solver.push()
             try:
                 _pin_bag(solver, world, bag, mask, mask_fixed)
-                if solver.check() != sat:
+                if _budget_check(solver) != sat:
                     continue
                 # 组前提里已经有技能声明时，不必再加一遍。
                 if not claims_loaded:
                     for observation in _matched_abilities(bag, mask, trusted_claims, soft_abilities):
                         solver.add(observation.claim)
-                    if solver.check() != sat:
+                    if _budget_check(solver) != sat:
                         continue
             finally:
                 solver.pop()

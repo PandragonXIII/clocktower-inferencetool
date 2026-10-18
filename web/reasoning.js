@@ -21,24 +21,53 @@ window.Reasoning = (() => {
    const add = el("button", "新增假设"); add.id = "add-global-assumption"; add.type = "button"; add.dataset.focus = "global-assumption"; add.setAttribute("aria-haspopup", "dialog");
    let currentRequest;
    add.addEventListener("click", () => window.GlobalAssumptions.open(currentRequest));
-   bar.append(add, button, status);
+    const probabilityToggle = document.getElementById("probability-mode");
+    probabilityToggle.addEventListener("change", () => window.App.setProbabilityMode(probabilityToggle.checked));
+    bar.append(add, button, status);
     const help = el("div", undefined, "reasoning-help");
     const helpIcon = el("button", "?", "reasoning-help-icon"); helpIcon.type = "button"; helpIcon.setAttribute("aria-label", "推理范围说明"); helpIcon.setAttribute("aria-describedby", "reasoning-help");
-    const helpText = el("p", "查询当前时点的阵营和身份候选。跨时点延续仅用于卡片显示；停用的动作、死亡、投票记录及未接入的全局假设不参与推理。", "reasoning-tooltip"); helpText.id = "reasoning-help"; helpText.setAttribute("role", "tooltip");
+    const helpText = el("p", "查询当前时点的阵营和身份候选。跨时点延续仅用于卡片显示；停用记录不参与。概率模式单独估计初始身份，不改变逻辑条件。", "reasoning-tooltip"); helpText.id = "reasoning-help"; helpText.setAttribute("role", "tooltip");
     help.append(helpIcon, helpText);
   const details = el("div"); details.id = "reasoning-details"; details.hidden = true; details.setAttribute("aria-live", "polite");
-   const unsupported = el("p", "", "warning"); unsupported.setAttribute("role", "status"); unsupported.hidden = true;
+   const participation = el("div"); participation.id = "reasoning-participation"; participation.setAttribute("role", "status"); participation.hidden = true;
     const columns = el("div", undefined, "reasoning-columns"), left = el("div", undefined, "reasoning-main"), right = el("div", undefined, "reasoning-phase");
     left.append(title, bar, help); columns.append(left, right);
-    root.append(columns, unsupported, details);
+    root.append(columns, participation, details);
   let previousResponse, previousRequest, previousError;
-    function render(request, response, state, phaseControls) {
-      if (phaseControls) right.replaceChildren(phaseControls);
-     currentRequest = request;
+   const name = (id) => window.ClocktowerRoles.names[id] || id;
+   const participationLabel = (request, p) => {
+     const entry = [...arr(request?.assumptions), ...arr(request?.facts), ...arr(request?.queries)].find((v) => v.id === p.id);
+     if (!entry) return p.id;
+     if (entry.data?.ability_id) return window.ClocktowerSkills.all.find((s) => s.id === entry.data.ability_id)?.name || entry.data.ability_id;
+     if (entry.data?.kind === "role_absent") return `${name(entry.data.role_id)}不在场（${timeName(entry.data.time)}）`;
+     if (entry.proposition) return describe(entry.proposition, request);
+     return entry.type || p.id;
+   };
+   const statusText = { applied: "已作为结构化约束参与", partial: "只提供了部分结构化约束", record_only: "仅记录，未产生结构化约束", disabled: "已停用，不参与推理" };
+   function render(request, response, state, phaseControls) {
+       if (phaseControls) right.replaceChildren(phaseControls);
+      currentRequest = request;
+      probabilityToggle.checked = request?.options?.probability_mode === true;
+      probabilityToggle.disabled = !request?.game || state.busy;
      add.disabled = !request?.game;
-     const globalCount = arr(request?.facts).filter((f) => f.type === "botc:global_assumption" && f.data?.requested_enabled === true).length;
-     unsupported.hidden = !globalCount;
-     unsupported.textContent = globalCount ? `${globalCount} 条全局假设待后台接入，尚未参与推理；以下结论不包含这些条件。` : "";
+     const globals = arr(request?.facts).filter((f) => f.type === "botc:global_assumption");
+     const enabledGlobals = globals.filter((f) => f.enabled === true).length, disabledGlobals = globals.length - enabledGlobals;
+     const answered = response && window.App.isReasonResponse(response, request);
+     const rows = answered ? arr(response.extensions?.["reasoner:participation"]) : [];
+     const lines = [];
+     if (!answered) {
+       if (enabledGlobals) lines.push(`${enabledGlobals} 条已启用的全局假设将作为“该时点全员非此角色”的结构化约束参与推理。`);
+       if (disabledGlobals) lines.push(`${disabledGlobals} 条已停用的全局假设不参与本次推理。`);
+     } else {
+       const applied = rows.filter((p) => p.status === "applied").length;
+       if (applied) lines.push(`${applied} 条输入已作为结构化约束参与推理。`);
+       rows.filter((p) => ["partial", "record_only", "disabled"].includes(p.status)).forEach((p) => {
+         lines.push(`${participationLabel(request, p)}：${statusText[p.status] || p.status}${p.reason ? `（${p.reason}）` : ""}`);
+       });
+       if (disabledGlobals) lines.push(`${disabledGlobals} 条已停用的全局假设不参与本次推理。`);
+     }
+     participation.hidden = !lines.length;
+     participation.replaceChildren(...lines.map((t) => el("p", t, "warning")));
     const { busy, pending, error } = state;
     button.disabled = busy; button.textContent = busy ? "推理中…" : "开始推理";
     button.setAttribute("aria-busy", String(busy));
@@ -54,14 +83,26 @@ window.Reasoning = (() => {
     previousResponse = response; previousRequest = request; previousError = error;
     details.replaceChildren();
     if (error) { details.append(el("p", "网络、HTTP 或协议错误不代表输入有矛盾。请检查后台连接或请求内容后重试。")); return root; }
-    if (!valid) return root;
-    if (placeholder || response.consistency === "unknown") {
+     if (!valid) return root;
+     const probability = response.extensions?.["reasoner:probabilities"];
+     if (probability) {
+       details.append(el("h4", "初始身份概率估计"), el("p", probability.description || "带权抽样估计，不是精确概率，也不是必然结论。", "hint"));
+       if (probability.status !== "estimated") details.append(el("p", probability.reason || "概率估计未完成，不能当作零概率。", "warning"));
+       else arr(probability.rows).forEach((row) => {
+         const player = arr(request.game?.players).find((p) => p.id === row.player_id);
+         const values = Object.entries(row.probabilities || {}).sort((a, b) => b[1] - a[1]);
+         details.append(el("p", `${player ? `${player.seat} 号` : row.player_id}：${values.map(([role, value]) => `${name(role)} ${(value * 100).toFixed(1)}%`).join("、")}`));
+       });
+        if (probability.status === "estimated" && probability.reason) details.append(el("p", probability.reason, "warning"));
+        if (probability.status === "estimated" && response.consistency === "unsat") details.append(el("p", "全部启用条件一起采信时有矛盾；以上概率通过分别采信不同条件组合估计，不表示这些条件可以同时成立。", "hint"));
+      }
+     if (placeholder || response.consistency === "unknown") {
       details.append(el("p", response.reason || (placeholder ? "当前为占位适配器，未运行推理引擎。" : "后台未返回无法判断的原因。"))); return root;
     }
     if (response.consistency === "unsat") {
       details.append(el("h4", "矛盾原因"));
       const conflicts = arr(response.conflicts);
-      if (!conflicts.length || !conflicts.some((c) => arr(c.input_ids).length || arr(c.rule_ids).length)) details.append(el("p", "后台尚未返回矛盾原因，待接入后展示"));
+       if (!conflicts.length || !conflicts.some((c) => arr(c.input_ids).length || arr(c.rule_ids).length)) details.append(el("p", request.options?.probability_mode ? "全部条件一起采信时已证明矛盾。概率模式跳过详细冲突诊断以减少等待；概率估计会单独考虑不同采信组合。" : "后台本次未取得详细冲突依据。"));
       conflicts.forEach((c, i) => {
         const card = el("article", undefined, "evidence"); card.append(el("h5", `冲突 ${i + 1}`));
         arr(c.input_ids).forEach((id) => {

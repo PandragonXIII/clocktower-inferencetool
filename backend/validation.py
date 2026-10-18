@@ -42,6 +42,8 @@ _OPTIONS_FIELDS = {
     "max_worlds",
     "max_repairs",
     "max_repair_checks",
+    "probability_mode",
+    "probability_timeout_ms",
 }
 
 # Bounded integer options: key -> (minimum, maximum), inclusive.
@@ -50,6 +52,7 @@ _BOUNDED_OPTIONS = {
     "max_worlds": (0, 100),
     "max_repairs": (0, 10),
     "max_repair_checks": (1, 1024),
+    "probability_timeout_ms": (1, 300000),
 }
 
 _STATUS_VALUES = ("confirmed", "reported")
@@ -556,6 +559,8 @@ def _validate_options(value: Any, path: str) -> None:
                 _ptr(path, "timeout_ms"),
             )
 
+    if "probability_mode" in obj and type(obj["probability_mode"]) is not bool:
+        _fail("INVALID_REQUEST", "probability_mode must be boolean", _ptr(path, "probability_mode"))
     for key, (minimum, maximum) in _BOUNDED_OPTIONS.items():
         if key not in obj:
             continue

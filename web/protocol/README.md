@@ -43,6 +43,18 @@
 
 ## 双层分析与高级结果
 
+### 前端记录的参与约定
+
+支持四类 BOTC 扩展：技能观察、夜间死亡、白天投票和 `botc:global_assumption`。后者 `data` 为 `{kind:"role_absent",role_id,time,requested_enabled?}`，时间可为 setup/day/night，约束该时点全体玩家的真实身份均不是所选角色；不排除酒鬼的镇民标记。`enabled` 是唯一参与开关，旧 `requested_enabled:true` 不会复活停用记录。reported 全局假设属于 conditional。
+
+新录入技能、死亡和全局假设启用，投票草稿禁用、结算后启用。旧快照不自动迁移启用；可用全局开关、重新录入或在 JSON 中显式启用。首夜仅支持无人死亡；死亡列表是当夜完整公布结果。
+
+投票 `nominations` 按顺序转换为提名人、被提名人、逐人投票变量；settled 且显式带列表时关闭剩余提名槽，voting 不关闭未录入槽且不约束最终处决。省略 nominations 表示未记录提名而非零提名。`execution` 约束处决结果；`alive_count` 若提供也参与约束。threshold/highest_count/default_player_id 是前端计算展示值，不替代实际投票规则；override 不允许绕过规则矛盾。
+
+22 个角色的 UI 技能形状均可提交。结构化信息、目标、死亡／存活结果参与相应约束；送葬者若填写目标也约束前日被处决者，酒鬼结果约束镇民标记而非真实镇民身份。间谍魔典文本、陌客不具体的登记备注、疑似镇长转移不被解析成隐藏真相；圣徒只约束处决，镇长三人无处决只约束人数和处决，均不判断胜负。未观察结果不添加读数约束，但猎手／恶魔已指定的动作仍可保留。
+
+响应 `extensions["reasoner:participation"]` 按每条输入返回 `{id,status,reason}`，status 为 applied（有约束）、partial（只转换结构化部分）、record_only（仅保存）或 disabled（停用）。这不是求解成功保证；矛盾和预算不足仍按正常结果返回。`ui:*` 链接和时间线展示元数据本身不附加跨时段命题。
+
 真实适配器分别求解 **public（规则 + 公共输入）** 和 **conditional（规则 + 公共输入 + 当前采信的其他输入）**。顶层结果对应 conditional。条件背景矛盾不影响公共背景下已证明的结论；背景矛盾时查询返回 `inconsistent`，不据此推出任意身份。
 
 默认只有启用且 `confirmed` 的 `botc:night_deaths` 和已结算 `botc:day_vote` 属于 public，其余为 conditional。事实可用 `extensions["reasoner:scope"]` 显式设为 `public` 或 `conditional`，但只有 `confirmed` 允许 public；假设只能 conditional。`confirmed` role 仍指真实身份，`reported` role 指自认身份。
@@ -58,12 +70,37 @@
 | `max_worlds` | 0 | 0..100，0 关闭世界枚举 |
 | `max_repairs` | 0 | 0..10，0 关闭修复建议 |
 | `max_repair_checks` | 128 | 1..1024，每类修复的求解次数上限 |
+| `probability_mode` | false | 布尔。为 true 时增加一次初始身份带权抽样估计，写入 `reasoner:probabilities`；不改变逻辑条件 |
+| `probability_timeout_ms` | 120000 | 1..300000，**该次概率估计独立**的毫秒预算（与 `total_timeout_ms` 分开），仅在 `probability_mode` 为 true 时生效 |
 
 例如 `"options":{"total_timeout_ms":8000,"max_worlds":10,"max_repairs":3}`。世界枚举用于 sat 背景，修复用于 unsat 背景。总预算从分析阶段开始，不含变量／规则构建或等待适配器锁的时间，也不是整个 HTTP 请求的硬截止时间。预算有限时各项分析可能未完成。
 
+### 概率估计（`reasoner:probabilities`）
+
+`options.probability_mode` 为 true 时，真实适配器在正常分析之外，**另起一次独立预算**（`probability_timeout_ms`，默认 120000）做初始身份的带权抽样估计，结果写入响应 `extensions["reasoner:probabilities"]`。它**不改变本次请求的逻辑条件与逻辑结果**（`consistency`、`results` 仍来自正常分析），也不属于 public/conditional 两轨之一：`scope` 固定 `"conditional"`，`time` 固定 `{"phase":"setup"}`。为把预算留给概率估计，概率模式下正常分析跳过 `reasoner:diagnosis` 与 `reasoner:role_ranges`（连同旧字段 `trouble_brewing:possible_roles`）；显式查询、`max_repairs` 修复和 `max_worlds` 世界枚举仍按原语义执行，逻辑 `unsat` 也不会被概率结果掩盖。
+
+它的条件方式是 **public 硬条件 + conditional 软采信**：
+
+- `scope == "public"` 的全部启用输入始终作为硬约束；public 背景 `unsat` → `status:"inconsistent"`，不抽样。
+- 其余启用输入（conditional，包括事实与假设）按 `owner_id` 分组；没有归属的输入各自成组。每个组以可信度 `0.7` 做伯努利采信，枚举「采信 / 忽略」组合：`n` 个组共 `2^n` 种，权重为 `0.7^采信组数 × 0.3^忽略组数`。组数不超过 6 时全部枚举；更多时按固定种子抽样至多 64 种，并在 `groups.complete:false` 标注只覆盖部分组合。
+- 每组组合把**被采信输入的已编译表达式原样**加入求解器——包括 `reported` 角色声明编译出的 `belief`（自认身份，不是真实身份）。适配器不改写映射，也不会因为输入是 conditional 就把 `confirmed` role 降级成 belief。
+- 逻辑上矛盾的组合权重为 0，被跳过；**用户输入之间互相矛盾不会让概率整体变成 `inconsistent`**，剩余一致组合仍会估计并归一化。只有 public 背景矛盾才是 `inconsistent`。
+- 对每个可行组合调用带权抽样估计器，再按组合权重合并各角色概率并归一化到 1。启用的 `botc:ability_observation` 会随其所在组作为 `trusted_abilities` 传入。
+- 枚举或抽样因预算耗尽、单次求解超时或未取到样本而中止时，`status:"unknown"`、`rows:[]`；**不把未判定组合当排除，也不归一化只成功的部分组合**。
+
+CLI 的 `test_reasoning.py` 仍按玩家可信度 0.7 对自认/技能声明分软采信组，语义不变；HTTP 适配器现在也做类似的组级软采信，但分组键是通用 `owner_id`，不是只针对角色声明，且 public 输入始终为硬条件。见 [botc_reasoner 文档](../botc_reasoner/README.md#概率估计probabilitypy--probability_adapterpy)。
+
+`status` 取值：`estimated`（已抽样）、`unknown`（预算耗尽、单次求解超时或未取到样本）、`inconsistent`（public 背景本身矛盾）。诚实标注：
+
+- `complete` 恒为 `false`——这是抽样估计，**不是精确概率**，`method` 恒为 `"weighted_sampling"`。组合枚举是否完整另见 `groups.complete`。
+- `status != "estimated"` 时 `rows` 返回 `[]`，**不得读作任何角色概率为零**；未采样到的角色也**不代表 `impossible`**。
+- `inconsistent` 只说明 public 背景无概率，不是概率结论。逻辑结果为 `unsat` 的请求仍可能得到 `estimated`（conditional 冲突只排除相应采信组合）。
+
+字段：`conditioning` 固定 `"public_with_soft_conditional_inputs"`，`credibility` 为 `0.7`；`input_ids` 是全部参与估计的输入，`hard_input_ids` 是 public 硬条件，`soft_input_ids` 是按组采信的 conditional 输入；`groups` 为 `{total, checked, estimated, complete}`（全部组合数、已检查组合数、可行并完成估计的组合数、是否覆盖全部组合）。**samples 元数据** `target_accepted_per_group` / `max_trials_per_group` 是该适配器实际传给抽样器的「每个采信组合目标接受样本数 / 最大尝试次数」（当前固定为 `2` / `16`），用于解释估计精度与耗时，不改变概率语义。`rows` 每行为 `{ player_id, seat, probabilities }`，其中 `probabilities` 是 `{ role_id: float }`；失败或部分覆盖时附 `reason`。前端在推理结果区展示该估计，并明确提示它不是必然结论。
+
 ### 响应扩展
 
-以下均放在响应 `extensions`，现有网页尚未专门渲染这些高级结果，可直接查看 API JSON。
+以下均放在响应 `extensions`。其中 `reasoner:participation` 与 `reasoner:probabilities`（后者仅 `probability_mode` 时出现）已在网页推理结果区展示；其余高级结果尚未专门渲染，可直接查看 API JSON。
 
 | 字段 | 当前内容 |
 | --- | --- |
@@ -73,9 +110,12 @@
 | `reasoner:conclusions` | 已证 necessary 命题、scope、输入及规则依据；`basis_type:full_context` 是整个背景，不是最小证明 |
 | `reasoner:diagnosis` | 按 scope 返回冲突核或 unknown，附说明、输入描述、规则组名称 |
 | `reasoner:role_ranges` | conditional 初始身份范围：`scope/time/rows/complete`；每行含玩家、seat、可行 `role_ids`、已排除 `impossible_role_ids`、未判定 `unknown_role_ids`、`complete` |
+| `reasoner:participation` | 逐条输入的 `id/status/reason`，说明是否被编译成约束（`applied`/`partial`/`record_only`/`disabled`） |
 | `reasoner:repairs` | `identity`（仅身份）和 `general`（所有条件输入）两类撤回方案 |
 | `reasoner:worlds` | 初始角色联合世界：`worlds:[{roles:{玩家id:角色id}}]`、`returned_count/complete/total/truncated_reason/time` |
 | `reasoner:timeout` | `total_ms/per_solve_ms/hit`，反映总预算是否耗尽 |
+| `reasoner:timings` | 真实连接器每阶段的实测毫秒：`build_ms/analysis_ms/probability_ms/total_ms`，以及 `excludes`（`adapter_lock_wait`、`http_transport`）。用于本地性能对比，不是预算或硬截止；不修改任何推理结论 |
+| `reasoner:probabilities` | `probability_mode` 时的初始身份带权抽样估计：`status/method/scope/conditioning/credibility/time/complete/seed/input_ids/hard_input_ids/soft_input_ids/groups/target_accepted_per_group/max_trials_per_group/rows/description`，行含 `player_id/seat/probabilities`（见上一节） |
 
 冲突按规则组、域公理和单条输入追踪。`minimality:inclusion` 仅表示核内任一组都不可再删除，不表示最少条数；`unverified` 表示收缩未完成。撤回一个核中的一条未必修复其他冲突。解释说明联合不相容，不宣称逐步证明。未取得核时不生成虚假的顶层 `conflicts`。
 
@@ -137,20 +177,20 @@
 
 #### 已知扩展事实的 `data` 形状
 
-后台当前已识别三类 BOTC 扩展（见 `types.ts` 中 `AbilityObservationData` / `NightDeathsData` / `DayVoteData`，它们只是文档性注解，不改变 `ExtensionFact.data: JsonValue` 的开放结构）：
+后台当前已识别四类 BOTC 扩展（见 `types.ts` 中 `AbilityObservationData` / `NightDeathsData` / `DayVoteData` / `GlobalAssumptionData`，它们只是文档性注解，不改变 `ExtensionFact.data: JsonValue` 的开放结构）：
 
 | `type` | `data` 摘要 |
 | --- | --- |
 | `botc:ability_observation` | `time`（day/night + 正数）、`actor_id`、`role_id`、`targets`，以及 `result.kind`（`unobserved`/`no_outsiders`/`no_direct_result`/`role`/`number`/`text`/`choice`）与对应字段。 |
-| `botc:night_deaths` | `time`（night）、`player_ids`、`result`（`deaths`/`none`）。 |
-| `botc:day_vote` | `time`（day）、`stage`（`voting`/`settled`）、`execution.player_id`（可为 `null`），可选 `nominations` 等记录字段。 |
+| `botc:night_deaths` | `time`（night）、`player_ids`、`result`（`deaths`/`none`）。首夜仅支持无人死亡。 |
+| `botc:day_vote` | `time`（day）、`stage`（`voting`/`settled`）、`execution.player_id`（可为 `null`），可选 `nominations`（提名人/被提名人/逐人投票）、`alive_count` 等。 |
+| `botc:global_assumption` | `kind`（`role_absent`）、`role_id`、`time`（setup/day/night），可选 `requested_enabled`（仅兼容旧字段）。 |
 
 约定：
 
-- **`enabled: false` 不解析 `data`**：可保存任意草稿。
-- **结构非法或引用不存在**（未知玩家/角色、时间晚于 `game.time`、字段类型错误）返回 `400`。
-- **结构合法但当前模型不支持**返回 `422`，例如未结算投票（`stage: "voting"`）、首夜死亡、转换层未支持的角色观察。`422` 不是格式错误，不代表已支持。
-- 未结算的投票、前端未完成记录等应以 `enabled: false` 保存。
+- **`enabled: false` 不解析 `data`**：可保存任意草稿；`enabled` 是唯一参与开关。
+- **结构非法或引用不存在**（未知玩家/角色、时间晚于 `game.time`、字段类型错误、未知全局假设 `kind`）返回 `400`。
+- **结构合法但当前模型不支持**返回 `422`，当前主要为首夜出现死者。未结算投票（`stage: "voting"`）与多数角色观察现在通过校验，由转换层做部分或完整转换；实际参与情况见响应 `extensions["reasoner:participation"]`，`422` 不是格式错误，不代表已支持。
 
 ### assumptions
 
